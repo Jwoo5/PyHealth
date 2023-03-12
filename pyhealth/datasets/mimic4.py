@@ -4,7 +4,7 @@ from typing import Optional, List, Dict, Union, Tuple
 import pandas as pd
 
 from pyhealth.data import Event, Visit, Patient
-from pyhealth.datasets import BaseEHRDataset
+from pyhealth.datasets import BaseEHRDataset, BaseEHRSparkDataset
 from pyhealth.datasets.utils import strptime
 
 # TODO: add other tables
@@ -365,6 +365,130 @@ class MIMIC4Dataset(BaseEHRDataset):
         patients = self._add_events_to_patient_dict(patients, group_df)
         return patients
 
+class MIMIC4SparkDataset(BaseEHRSparkDataset):
+    """TODO: to be written
+    The MIMIC-IV dataset is a large dataset of de-identified health records of ICU
+    patients. The dataset is available at https://mimic.physionet.org/.
+
+    The basic information is stored in the following tables:
+        - patients: defines a patient in the database, subject_id.
+        - admission: define a patient's hospital admission, hadm_id.
+        - icustays: defines a patient's ICU stay, stay_id.    
+    """
+
+    def parse_basic_info(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """Helper functions which parses patients and admissions tables.
+
+        Will be called in `self.parse_tables()`
+
+        Docs:
+            - patients:https://mimic.mit.edu/docs/iv/modules/hosp/patients/
+            - admissions: https://mimic.mit.edu/docs/iv/modules/hosp/admissions/
+
+        Args:
+            patients: a dict of `Patient` objects indexed by patient_id.
+
+        Returns:
+            The updated patients dict.
+        """
+        # read patients table
+        patients_df = pd.read_csv(
+            os.path.join(self.root, "patients.csv"),
+            dtype={"subject_id": str},
+            nrows=1000 if self.dev else None,
+        )
+        # read admissions table
+        admissions_df = pd.read_csv(
+            os.path.join(self.root, "admissions.csv"),
+            dtype={"subject_id": str, "hadm_id": str},
+        )
+        # read icustays table
+        icustays_df = pd.read_csv(
+            os.path.join(self.root, "icustays.csv"),
+            dtype={"SUBJECT_ID": str, "stay_id": str}
+        )
+
+        if self.visit_unit == "hospital":
+            visit_key = "hadm_id"
+            encounter_key = "admittime"
+            discharge_key = "dischtime"
+        elif self.visit_unit == "icu":
+            visit_key = "stay_id"
+            encounter_key = "intime"
+            discharge_key = "outtime"
+
+        # merge patient, admission, and icustay tables
+        df = pd.merge(patients_df, admissions_df, on="subject_id", how="inner")
+        df = pd.merge(df, icustays_df, on="subject_id", how="inner")
+        # sort by admission and discharge time
+        df = df.sort_values(["subject_id", encounter_key, discharge_key], ascending=True)
+        # group by patient
+        df_group = df.groupby("subject_id")
+
+        # parallel unit of basic information (per patient)
+        def basic_unit(p_id, p_info):
+            # no exact birth datetime in MIMIC-IV
+            # use anchor_year and anchor_age to approximate birth datetime
+            anchor_year = int(p_info["anchor_year"].values[0])
+            anchor_age = int(p_info["anchor_age"].values[0])
+            birth_year = anchor_year - anchor_age
+            patient = Patient(
+                patient_id=p_id,
+                # no exact month, day, and time, use Jan 1st, 00:00:00
+                birth_datetime=strptime(str(birth_year)),
+                # no exact time, use 00:00:00
+                death_datetime=strptime(p_info["dod"].values[0]),
+                gender=p_info["gender"].values[0],
+                ethnicity=p_info["race"].values[0],
+                anchor_year_group=p_info["anchor_year_group"].values[0],
+            )
+            # load visits
+            for v_id, v_info in p_info.groupby(visit_key):
+                visit = Visit(
+                    visit_id=v_id,
+                    patient_id=p_id,
+                    encounter_time=strptime(v_info[encounter_key].values[0]),
+                    discharge_time=strptime(v_info[discharge_key].values[0]),
+                    discharge_status=v_info["hospital_expire_flag"].values[0],
+                )
+                # add visit
+                patient.add_visit(visit)
+            return patient
+
+        # parallel apply
+        df_group = df_group.parallel_apply(
+            lambda x: basic_unit(x.subject_id.unique()[0], x)
+        )
+        # summarize the results
+        for pat_id, pat in df_group.items():
+            patients[pat_id] = pat
+
+        return patients
+
+    def parse_diagnoses_icd(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_procedures_icd(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_prescriptions(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_labevents(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_inputevents(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
 
 if __name__ == "__main__":
     dataset = MIMIC4Dataset(

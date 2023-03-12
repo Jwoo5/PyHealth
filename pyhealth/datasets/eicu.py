@@ -6,7 +6,7 @@ from tqdm import tqdm
 from datetime import datetime
 
 from pyhealth.data import Event, Visit, Patient
-from pyhealth.datasets import BaseEHRDataset
+from pyhealth.datasets import BaseEHRDataset, BaseEHRSparkDataset
 from pyhealth.datasets.utils import strptime
 
 # TODO: add other tables
@@ -563,6 +563,159 @@ class eICUDataset(BaseEHRDataset):
         patients = self._add_events_to_patient_dict(patients, group_df)
         return patients
 
+class eICUSparkDataset(BaseEHRSparkDataset):
+    """TODO: to be written"""
+
+    def __init__(self, **kwargs):
+        # store a mapping from visit_id to patient_id
+        # will be used to parse clinical tables as they only contain visit_id
+        self.visit_id_to_patient_id: Dict[str, str] = {}
+        self.visit_id_to_encounter_time: Dict[str, datetime] = {}
+        super(eICUDataset, self).__init__(**kwargs)
+
+    def parse_basic_info(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """Helper functions which parses patient and hospital tables.
+
+        Will be called in `self.parse_tables()`.
+
+        Docs:
+            - patient: https://eicu-crd.mit.edu/eicutables/patient/
+            - hospital: https://eicu-crd.mit.edu/eicutables/hospital/
+
+        Args:
+            patients: a dict of `Patient` objects indexed by patient_id.
+
+        Returns:
+            The updated patients dict.
+
+        Note:
+            We use `Patient` object to represent a hospital admission of a patient,
+            and use `Visit` object to store the ICU stays within that hospital
+            admission.
+        """
+        # read patient table
+        patient_df = pd.read_csv(
+            os.path.join(self.root, "patient.csv"),
+            dtype={
+                "uniquepid": str,
+                "patienthealthsystemstayid": str,
+                "patientunitstayid": str,
+            },
+            nrows=5000 if self.dev else None,
+        )
+        # read hospital table
+        hospital_df = pd.read_csv(os.path.join(self.root, "hospital.csv"))
+        hospital_df.region = hospital_df.region.fillna("Unknown").astype(str)
+        # merge patient and hospital tables
+        df = pd.merge(patient_df, hospital_df, on="hospitalid", how="left")
+        # sort by ICU admission and discharge time
+        df["neg_hospitaladmitoffset"] = -df["hospitaladmitoffset"]
+        df = df.sort_values(
+            [
+                "uniquepid",
+                "patienthealthsystemstayid",
+                "neg_hospitaladmitoffset",
+                "unitdischargeoffset",
+            ],
+            ascending=True,
+        )
+        # group by patient and hospital admission
+        df_group = df.groupby(["uniquepid", "patienthealthsystemstayid"])
+        # load patients
+        for (p_id, ha_id), p_info in tqdm(df_group, desc="Parsing patients"):
+            # each Patient object is a single hospital admission of a patient
+            patient_id = f"{p_id}+{ha_id}"
+
+            # hospital admission time (Jan 1 of hospitaldischargeyear, 00:00:00)
+            ha_datetime = strptime(str(p_info["hospitaldischargeyear"].values[0]))
+
+            # no exact birth datetime in eICU
+            # use hospital admission time and age to approximate birth datetime
+            age = p_info["age"].values[0]
+            if pd.isna(age):
+                birth_datetime = None
+            elif age == "> 89":
+                birth_datetime = ha_datetime - pd.DateOffset(years=89)
+            else:
+                birth_datetime = ha_datetime - pd.DateOffset(years=int(age))
+
+            # no exact death datetime in eICU
+            # use hospital discharge time to approximate death datetime
+            death_datetime = None
+            if p_info["hospitaldischargestatus"].values[0] == "Expired":
+                ha_los_min = (
+                    p_info["hospitaldischargeoffset"].values[0]
+                    - p_info["hospitaladmitoffset"].values[0]
+                )
+                death_datetime = ha_datetime + pd.Timedelta(minutes=ha_los_min)
+
+            patient = Patient(
+                patient_id=patient_id,
+                birth_datetime=birth_datetime,
+                death_datetime=death_datetime,
+                gender=p_info["gender"].values[0],
+                ethnicity=p_info["ethnicity"].values[0],
+            )
+
+            # load visits
+            for v_id, v_info in p_info.groupby("patientunitstayid"):
+                # each Visit object is a single ICU stay within a hospital admission
+
+                # base time is the hospital admission time
+                unit_admit = v_info["neg_hospitaladmitoffset"].values[0]
+                unit_discharge = unit_admit + v_info["unitdischargeoffset"].values[0]
+                encounter_time = ha_datetime + pd.Timedelta(minutes=unit_admit)
+                discharge_time = ha_datetime + pd.Timedelta(minutes=unit_discharge)
+
+                visit = Visit(
+                    visit_id=v_id,
+                    patient_id=patient_id,
+                    encounter_time=encounter_time,
+                    discharge_time=discharge_time,
+                    discharge_status=v_info["unitdischargestatus"].values[0],
+                    hospital_id=v_info["hospitalid"].values[0],
+                    region=v_info["region"].values[0],
+                )
+
+                # add visit
+                patient.add_visit(visit)
+                # add visit id to patient id mapping
+                self.visit_id_to_patient_id[v_id] = patient_id
+                # add visit id to encounter time mapping
+                self.visit_id_to_encounter_time[v_id] = encounter_time
+            # add patient
+            patients[patient_id] = patient
+        return patients
+
+    def parse_diagnosis(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_treatment(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_medication(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_lab(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_physicalexam(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_infusiondrug(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
 
 if __name__ == "__main__":
     dataset = eICUDataset(

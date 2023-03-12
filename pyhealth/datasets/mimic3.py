@@ -4,7 +4,7 @@ from typing import Optional, List, Dict, Tuple, Union
 import pandas as pd
 
 from pyhealth.data import Event, Visit, Patient
-from pyhealth.datasets import BaseEHRDataset
+from pyhealth.datasets import BaseEHRDataset, BaseEHRSparkDataset
 from pyhealth.datasets.utils import strptime
 
 # TODO: add other tables
@@ -357,6 +357,116 @@ class MIMIC3Dataset(BaseEHRDataset):
         # summarize the results
         patients = self._add_events_to_patient_dict(patients, group_df)
         return patients
+
+class MIMIC3SparkDataset(BaseEHRSparkDataset):
+    """TODO: to be written
+    
+    The MIMIC-III dataset is a large dataset of de-identified health records of ICU
+    patients. The dataset is available at https://mimic.physionet.org/.
+
+    The basic information is stored in the following tables:
+        - PATIENTS: defines a patient in the database, SUBJECT_ID.
+        - ADMISSIONS: defines a patient's hospital admission, HADM_ID.
+        - ICUSTAYS: defines a patient's ICU stay, ICUSTAY_ID
+    
+    """
+    def parse_basic_info(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        # read patients table
+        patients_df = pd.read_csv(
+            os.path.join(self.root, "PATIENTS.csv"),
+            dtype={"SUBJECT_ID": str},
+            nrows=1000 if self.dev else None,
+        )
+        # read admissions table
+        admissions_df = pd.read_csv(
+            os.path.join(self.root, "ADMISSIONS.csv"),
+            dtype={"SUBJECT_ID": str, "HADM_ID": str},
+        )
+        # read icustays table
+        icustays_df = pd.read_csv(
+            os.path.join(self.root, "ICUSTAYS.csv"),
+            dtype={"SUBJECT_ID": str, "ICUSTAY_ID": str}
+        )
+
+        if self.visit_unit == "hospital":
+            visit_key = "HADM_ID"
+            encounter_key = "ADMITTIME"
+            discharge_key = "DISCHTIME"
+        elif self.visit_unit == "icu":
+            visit_key = "ICUSTAY_ID"
+            encounter_key = "INTIME"
+            discharge_key = "OUTTIME"
+
+        # merge patient, admission, and icustay tables
+        df = pd.merge(patients_df, admissions_df, on="SUBJECT_ID", how="inner")
+        df = pd.merge(df, icustays_df, on="SUBJECT_ID", how="inner")
+        # sort by admission and discharge time
+        df = df.sort_values(["SUBJECT_ID", encounter_key, discharge_key], ascending=True)
+        # group by patient
+        df_group = df.groupby("SUBJECT_ID")
+
+        # parallel unit of basic information (per patient)
+        def basic_unit(p_id, p_info):
+            patient = Patient(
+                patient_id=p_id,
+                birth_datetime=strptime(p_info["DOB"].values[0]),
+                death_datetime=strptime(p_info["DOD_HOSP"].values[0]),
+                gender=p_info["GENDER"].values[0],
+                ethnicity=p_info["ETHNICITY"].values[0],
+            )
+            # load visits
+            for v_id, v_info in p_info.groupby(visit_key):
+                visit = Visit(
+                    visit_id=v_id,
+                    patient_id=p_id,
+                    encounter_time=strptime(v_info[encounter_key].values[0]),
+                    discharge_time=strptime(v_info[discharge_key].values[0]),
+                    discharge_status=v_info["HOSPITAL_EXPIRE_FLAG"].values[0],
+                )
+                # add visit
+                patient.add_visit(visit)
+            return patient
+
+        # parallel apply
+        df_group = df_group.parallel_apply(
+            lambda x: basic_unit(x.SUBJECT_ID.unique()[0], x)
+        )
+        # summarize the results
+        for pat_id, pat in df_group.items():
+            patients[pat_id] = pat
+
+        return patients
+
+    def parse_diagnoses_icd(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_procedures_icd(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_prescriptions(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_labevents(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_inputevents_mv(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
+
+    def parse_inputevents_cv(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        #TODO
+        raise NotImplementedError()
 
 
 if __name__ == "__main__":

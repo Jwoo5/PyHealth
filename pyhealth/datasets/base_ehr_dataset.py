@@ -4,7 +4,7 @@ import os
 from abc import ABC
 from collections import Counter
 from copy import deepcopy
-from typing import Dict, Callable, Tuple, Union, List, Optional
+from typing import Dict, Callable, Tuple, Union, List, Optional, Literal, get_args
 
 import pandas as pd
 from tqdm import tqdm
@@ -35,6 +35,7 @@ dataset.patients: patient_id -> <Patient>
             - other event-level info
 """
 
+VISIT_UNIT_CHOICES = Literal["hospital", "icu"]
 
 # TODO: parse_tables is too slow
 
@@ -409,3 +410,62 @@ class BaseEHRDataset(ABC):
             task_name=task_name,
         )
         return sample_dataset
+
+class BaseEHRSparkDataset(BaseEHRDataset):
+    """Abstract base dataset class utilizing spark functions for the efficient data processing.
+
+    This class also supports additional functionalities other than Spark such as processing 
+    each visit as a ICU stay instead of hospital admission based on the user choice (if applicable).
+
+    TODO: to be written for details 
+
+    Args:
+        dataset_name: name of the dataset.
+        root: root directory of the raw data (should contain many csv files).
+        tables: list of tables to be loaded (e.g., ["DIAGNOSES_ICD", "PROCEDURES_ICD"]). Basic tables will be loaded by default.
+        visit_unit: unit of visit to be grouped. Available options are typed in VISIT_UNIT_CHOICES.
+            Default is "hospital", which means to regard each hospital admission as a visit.
+        code_mapping: a dictionary containing the code mapping information.
+            The key is a str of the source code vocabulary and the value is of
+            two formats:
+                - a str of the target code vocabulary. E.g., {"NDC", "ATC"}.
+                - a tuple with two elements. The first element is a str of the
+                    target code vocabulary and the second element is a dict with
+                    keys "source_kwargs" or "target_kwargs" and values of the
+                    corresponding kwargs for the `CrossMap.map()` method. E.g.,
+                    {"NDC", ("ATC", {"target_kwargs": {"level": 3}})}.
+            Default is empty dict, which means the original code will be used.
+        dev: whether to enable dev mode (only use a small subset of the data).
+            Default is False.
+        refresh_cache: whether to refresh the cache; if true, the dataset will
+            be processed from scratch and the cache will be updated. Default is False.
+    """
+    def __init__(
+        self,
+        root,
+        tables,
+        visit_unit: VISIT_UNIT_CHOICES = "hospital",
+        **kwargs
+    ):
+
+        assert visit_unit in get_args(VISIT_UNIT_CHOICES), (
+            f"{visit_unit} is not a valid option for --visit_unit. Note that --visit_unit should "
+            f"be one of these choices: {get_args(VISIT_UNIT_CHOICES)}"
+        )
+        self.visit_unit = visit_unit
+
+        super().__init__(
+            root=root,
+            tables=tables,
+            **kwargs
+        )
+
+    def set_task(
+        self,
+        task_fn: Union[str, Callable, List[str], List[Callable]],
+        feature_process_fn: Callable,
+    ) -> SampleEHRDataset:
+        """TODO: to be written"""
+
+        if isinstance(task_fn, str):
+            ...
