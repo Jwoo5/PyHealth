@@ -2,6 +2,11 @@ import os
 from typing import Optional, List, Dict, Union, Tuple
 
 import pandas as pd
+import datetime
+
+from pyspark.sql import SparkSession
+import pyspark.sql.functions as F
+from pyspark.sql.types import StructType, StructField, ArrayType, StringType
 
 from pyhealth.data import Event, Visit, Patient
 from pyhealth.datasets import BaseEHRDataset, BaseEHRSparkDataset
@@ -376,6 +381,23 @@ class MIMIC4SparkDataset(BaseEHRSparkDataset):
         - icustays: defines a patient's ICU stay, stay_id.    
     """
 
+    def __init__(
+        self,
+        root,
+        tables,
+        visit_unit,
+        **kwargs
+    ):
+        if visit_unit == "hospital":
+            self.visit_key = "hadm_id"
+            self.encounter_key = "admittime"
+            self.discharge_key = "dischtime"
+        elif visit_unit == "icu":
+            self.visit_key = "stay_id"
+            self.encounter_key = "intime"
+            self.discharge_key = "outtime"
+        super().__init__(root, tables, visit_unit, **kwargs)
+
     def parse_basic_info(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
         """Helper functions which parses patients and admissions tables.
 
@@ -405,23 +427,31 @@ class MIMIC4SparkDataset(BaseEHRSparkDataset):
         # read icustays table
         icustays_df = pd.read_csv(
             os.path.join(self.root, "icustays.csv"),
-            dtype={"SUBJECT_ID": str, "stay_id": str}
+            dtype={"subject_id": str, "stay_id": str}
         )
 
-        if self.visit_unit == "hospital":
-            visit_key = "hadm_id"
-            encounter_key = "admittime"
-            discharge_key = "dischtime"
-        elif self.visit_unit == "icu":
-            visit_key = "stay_id"
-            encounter_key = "intime"
-            discharge_key = "outtime"
-
         # merge patient, admission, and icustay tables
-        df = pd.merge(patients_df, admissions_df, on="subject_id", how="inner")
-        df = pd.merge(df, icustays_df, on="subject_id", how="inner")
+        df = pd.merge(
+            patients_df,
+            admissions_df[[
+                "subject_id",
+                "hadm_id",
+                "admittime",
+                "dischtime",
+                "race",
+                "hospital_expire_flag"
+            ]],
+            on="subject_id",
+            how="inner"
+        )
+        df = pd.merge(
+            df,
+            icustays_df[["subject_id", "stay_id", "intime", "outtime"]],
+            on="subject_id",
+            how="inner"
+        )
         # sort by admission and discharge time
-        df = df.sort_values(["subject_id", encounter_key, discharge_key], ascending=True)
+        df = df.sort_values(["subject_id", self.encounter_key, self.discharge_key], ascending=True)
         # group by patient
         df_group = df.groupby("subject_id")
 
@@ -443,12 +473,12 @@ class MIMIC4SparkDataset(BaseEHRSparkDataset):
                 anchor_year_group=p_info["anchor_year_group"].values[0],
             )
             # load visits
-            for v_id, v_info in p_info.groupby(visit_key):
+            for v_id, v_info in p_info.groupby(self.visit_key):
                 visit = Visit(
                     visit_id=v_id,
                     patient_id=p_id,
-                    encounter_time=strptime(v_info[encounter_key].values[0]),
-                    discharge_time=strptime(v_info[discharge_key].values[0]),
+                    encounter_time=strptime(v_info[self.encounter_key].values[0]),
+                    discharge_time=strptime(v_info[self.discharge_key].values[0]),
                     discharge_status=v_info["hospital_expire_flag"].values[0],
                 )
                 # add visit
@@ -475,20 +505,461 @@ class MIMIC4SparkDataset(BaseEHRSparkDataset):
         #TODO
         raise NotImplementedError()
 
-    def parse_prescriptions(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+    def parse_prescriptions(
+        self,
+        patients: Dict[str, Patient],
+        spark: SparkSession
+    ) -> Dict[str, Patient]:
         """TODO: to be written"""
-        #TODO
-        raise NotImplementedError()
+        table = "prescriptions"
+        
+        spark_df = spark.read.csv(os.path.join(self.root, f"{table}.csv"), header=True)
+        if self.dev:
+            spark_df = spark_df.limit(3000)
+        # convert dtype of starttime to datetime
+        spark_df = spark_df.withColumn("starttime", F.to_timestamp("starttime"))
+        
+        if self.visit_unit == "icu":
+            spark_df = self.filter_events(
+                spark=spark,
+                spark_df=spark_df,
+                timestamp_key="starttime",
+                joined_table="icustays",
+                select=["hadm_id", "stay_id", "intime", "outtime"],
+                on="hadm_id",
+                should_infer_icustay_id=True,
+            )
+        else:
+            spark_df = self.filter_events(
+                spark=spark,
+                spark_df=spark_df,
+                timestamp_key="starttime",
+                joined_table="admissions",
+                select=["hadm_id", "admittime", "dischtime"],
+                on="hadm_id",
+                should_infer_icustay_id=False,
+            )
 
-    def parse_labevents(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
-        """TODO: to be written"""
-        #TODO
-        raise NotImplementedError()
+        # sort by starttime
+        spark_df = spark_df.sort(
+            ["subject_id", self.visit_key, "starttime", "stoptime"],
+            ascending=True
+        )
+        
+        schema = StructType(
+            [
+                StructField("patient_id", StringType(), False),
+                StructField("visit_id", StringType(), False),
+                StructField("code", ArrayType(StringType()), False),
+                StructField("timestamp", ArrayType(StringType()), False),
+                StructField("pharmacy_id", ArrayType(StringType()), False),
+                StructField("poe_id", ArrayType(StringType()), False),
+                StructField("poe_seq", ArrayType(StringType()), False),
+                StructField("drug_type", ArrayType(StringType()), False),
+                StructField("drug", ArrayType(StringType()), False),
+                StructField("formulary_drug_cd", ArrayType(StringType()), False),
+                StructField("gsn", ArrayType(StringType()), False),
+                StructField("prod_strength", ArrayType(StringType()), False),
+                StructField("form_rx", ArrayType(StringType()), False),
+                StructField("dose_val_rx", ArrayType(StringType()), False),
+                StructField("dose_unit_rx", ArrayType(StringType()), False),
+                StructField("form_val_disp", ArrayType(StringType()), False),
+                StructField("form_unit_disp", ArrayType(StringType()), False),
+                StructField("doses_per_24_hrs", ArrayType(StringType()), False),
+                StructField("route", ArrayType(StringType()), False)
+            ]
+        )
+        @F.pandas_udf(schema, functionType=F.PandasUDFType.GROUPED_MAP)
+        def prescription_unit(df):
+            patient_id = str(df["subject_id"].iloc[0])
+            visit_id = str(df[self.visit_key].iloc[0])
+            code = df["ndc"].tolist()
+            timestamp = [str(t) for t in df["starttime"].tolist()]
+            pharmacy_id = df["pharmacy_id"].tolist()
+            poe_id = df["poe_id"].tolist()
+            poe_seq = df["poe_seq"].tolist()
+            drug_type = df["drug_type"].tolist()
+            drug = df["drug"].tolist()
+            formulary_drug_cd = df["formulary_drug_cd"].tolist()
+            gsn = df["gsn"].tolist()
+            prod_strength = df["prod_strength"].tolist()
+            form_rx = df["form_rx"].tolist()
+            dose_val_rx = df["dose_val_rx"].tolist()
+            dose_unit_rx = df["dose_unit_rx"].tolist()
+            form_val_disp = df["form_val_disp"].tolist()
+            form_unit_disp = df["form_unit_disp"].tolist()
+            doses_per_24_hrs = df["doses_per_24_hrs"].tolist()
+            route = df["route"].tolist()
+            return pd.DataFrame([[
+                patient_id,
+                visit_id,
+                code,
+                timestamp,
+                pharmacy_id,
+                poe_id,
+                poe_seq,
+                drug_type,
+                drug,
+                formulary_drug_cd,
+                gsn,
+                prod_strength,
+                form_rx,
+                dose_val_rx,
+                dose_unit_rx,
+                form_val_disp,
+                form_unit_disp,
+                doses_per_24_hrs,
+                route
+            ]])
 
-    def parse_inputevents(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        pandas_df = spark_df.groupBy(
+            "subject_id", self.visit_key
+        ).apply(prescription_unit).toPandas()
+        
+        def aggregate_events(row):
+            events = []
+            p_id = row["patient_id"]
+            v_id = row["visit_id"]
+            for (
+                code, timestamp, pharmacy_id, poe_id, poe_seq, drug_type, drug, formulary_drug_cd,
+                gsn, prod_strength, form_rx, dose_val_rx, dose_unit_rx, form_val_disp,
+                form_unit_disp, doses_per_24_hrs, route
+            ) in zip(
+                row["code"], row["timestamp"], row["pharmacy_id"], row["poe_id"], row["poe_seq"],
+                row["drug_type"], row["drug"], row["formulary_drug_cd"], row["gsn"],
+                row["prod_strength"], row["form_rx"], row["dose_val_rx"], row["dose_unit_rx"],
+                row["form_val_disp"], row["form_unit_disp"], row["doses_per_24_hrs"], row["route"]
+            ):
+                event = Event(
+                    code=code,
+                    table=table,
+                    vocabulary="NDC",
+                    visit_id=v_id,
+                    patient_id=p_id,
+                    timestamp=strptime(timestamp),
+                    pharmacy_id=pharmacy_id,
+                    poe_id=poe_id,
+                    poe_seq=poe_seq,
+                    drug_type=drug_type,
+                    drug=drug,
+                    formulary_drug_cd=formulary_drug_cd,
+                    gsn=gsn,
+                    prod_strength=prod_strength,
+                    form_rx=form_rx,
+                    dose_val_rx=dose_val_rx,
+                    dose_unit_rx=dose_unit_rx,
+                    form_val_disp=form_val_disp,
+                    form_unit_disp=form_unit_disp,
+                    doses_per_24_hrs=doses_per_24_hrs,
+                    route=route
+                )
+                events.append(event)
+            return events
+        
+        # parallel apply to aggregate events
+        aggregated_events = pandas_df.parallel_apply(aggregate_events, axis=1)
+        
+        # summarize the results
+        patients = self._add_events_to_patient_dict(patients, aggregated_events)
+        return patients
+
+    def parse_labevents(
+        self,
+        patients: Dict[str, Patient],
+        spark: SparkSession
+    ) -> Dict[str, Patient]:
         """TODO: to be written"""
-        #TODO
-        raise NotImplementedError()
+        table = "labevents"
+        
+        # read table
+        spark_df = spark.read.csv(os.path.join(self.root, f"{table}.csv"), header=True)
+        if self.dev:
+            spark_df = spark_df.limit(3000)
+        # convert dtype of charttime to datetime
+        spark_df = spark_df.withColumn("charttime", F.to_timestamp("charttime"))
+        
+        if self.visit_unit == "icu":
+            spark_df = self.filter_events(
+                spark=spark,
+                spark_df=spark_df,
+                timestamp_key="charttime",
+                joined_table="icustays",
+                select=["hadm_id", "stay_id", "intime", "outtime"],
+                on="hadm_id",
+                should_infer_icustay_id=True,
+            )
+        else:
+            spark_df = self.filter_events(
+                spark=spark,
+                spark_df=spark_df,
+                timestamp_key="charttime",
+                joined_table="admissions",
+                select=["hadm_id", "admittime", "dischtime"],
+                on="hadm_id",
+                should_infer_icustay_id=False,
+            )
+        
+        # sort by charttime
+        spark_df = spark_df.sort(["subject_id", self.visit_key, "charttime"], ascending=True)
+
+        schema = StructType(
+            [
+                StructField("patient_id", StringType(), False),
+                StructField("visit_id", StringType(), False),
+                StructField("code", ArrayType(StringType()), False),
+                StructField("timestamp", ArrayType(StringType()), False),
+                StructField("value", ArrayType(StringType()), False),
+                StructField("valuenum", ArrayType(StringType()), False),
+                StructField("valueuom", ArrayType(StringType()), False),
+                StructField("ref_range_lower", ArrayType(StringType()), False),
+                StructField("ref_range_upper", ArrayType(StringType()), False),
+                StructField("flag", ArrayType(StringType()), False),
+                StructField("priority", ArrayType(StringType()), False),
+                StructField("comments", ArrayType(StringType()), False)
+            ]
+        )
+        @F.pandas_udf(schema, functionType=F.PandasUDFType.GROUPED_MAP)
+        def lab_unit(df):
+            patient_id = str(df["subject_id"].iloc[0])
+            visit_id = str(df[self.visit_key].iloc[0])
+            code = df["itemid"].tolist()
+            timestamp = [str(t) for t in df["charttime"].tolist()]
+            value = df["value"].tolist()
+            valuenum = df["valuenum"].tolist()
+            valueuom = df["valueuom"].tolist()
+            ref_range_lower = df["ref_range_lower"].tolist()
+            ref_range_upper = df["ref_range_upper"].tolist()
+            flag = df["flag"].tolist()
+            priority = df["priority"].tolist()
+            comments = df["comments"].tolist()
+            return pd.DataFrame([[
+                patient_id,
+                visit_id,
+                code,
+                timestamp,
+                value,
+                valuenum,
+                valueuom,
+                ref_range_lower,
+                ref_range_upper,
+                flag,
+                priority,
+                comments
+            ]])
+
+        pandas_df = spark_df.groupBy("subject_id", self.visit_key).apply(lab_unit).toPandas()
+        
+        def aggregate_events(row):
+            events = []
+            p_id = row["patient_id"]
+            v_id = row["visit_id"]
+            for (
+                code, timestamp, value, valuenum, valueuom, ref_range_lower, ref_range_upper,
+                flag, priority, comments
+            ) in zip(
+                row["code"], row["timestamp"], row["value"], row["valuenum"], row["valueuom"],
+                row["ref_range_lower"], row["ref_range_upper"], row["flag"], row["priority"],
+                row["comments"]
+            ):
+                event = Event(
+                    code=code,
+                    table=table,
+                    vocabulary="MIMIC4_ITEMID",
+                    visit_id=v_id,
+                    patient_id=p_id,
+                    timestamp=strptime(timestamp),
+                    value=value,
+                    valuenum=valuenum,
+                    valueuom=valueuom,
+                    ref_range_lower=ref_range_lower,
+                    ref_range_upper=ref_range_upper,
+                    flag=flag,
+                    priority=priority,
+                    comments=comments
+                )
+                events.append(event)
+            return events
+
+        # parallel apply to aggregate events
+        aggregated_events = pandas_df.parallel_apply(aggregate_events, axis=1)
+        
+        # summarize the results
+        patients = self._add_events_to_patient_dict(patients, aggregated_events)
+        return patients
+
+    def parse_inputevents(
+        self,
+        patients: Dict[str, Patient],
+        spark: SparkSession
+    ) -> Dict[str, Patient]:
+        """TODO: to be written"""
+        table = "inputevents"
+        
+        # read table
+        spark_df = spark.read.csv(os.path.join(self.root, f"{table}.csv"), header=True)
+        if self.dev:
+            spark_df = spark_df.limit(3000)
+        # convert dtype of starttime
+        spark_df = spark_df.withColumn("starttime", F.to_timestamp("starttime"))
+        
+        if self.visit_unit == "icu":
+            spark_df = self.filter_events(
+                spark=spark,
+                spark_df=spark_df,
+                timestamp_key="starttime",
+                joined_table="icustays",
+                select=["stay_id", "intime", "outtime"],
+                on="stay_id",
+                should_infer_icustay_id=False,
+            )
+        else:
+            spark_df = self.filter_events(
+                spark=spark,
+                spark_df=spark_df,
+                timestamp_key="starttime",
+                joined_table="admissions",
+                select=["hadm_id", "admittime", "dischtime"],
+                on="hadm_id",
+                should_infer_icustay_id=False,
+            )
+        
+        # sort by starttime
+        spark_df = spark_df.sort(
+            ["subject_id", self.visit_key, "starttime", "endtime"],
+            ascending=True
+        )
+        
+        schema = StructType(
+            [
+                StructField("patient_id", StringType(), False),
+                StructField("visit_id", StringType(), False),
+                StructField("code", ArrayType(StringType()), False),
+                StructField("timestamp", ArrayType(StringType()), False),
+                StructField("amount", ArrayType(StringType()), False),
+                StructField("amountuom", ArrayType(StringType()), False),
+                StructField("rate", ArrayType(StringType()), False),
+                StructField("rateuom", ArrayType(StringType()), False),
+                StructField("orderid", ArrayType(StringType()), False),
+                StructField("linkorderid", ArrayType(StringType()), False),
+                StructField("ordercategoryname", ArrayType(StringType()), False),
+                StructField("secondaryordercategoryname", ArrayType(StringType()), False),
+                StructField("ordercomponenttypedescription", ArrayType(StringType()), False),
+                StructField("ordercategorydescription", ArrayType(StringType()), False),
+                StructField("patientweight", ArrayType(StringType()), False),
+                StructField("totalamount", ArrayType(StringType()), False),
+                StructField("totalamountuom", ArrayType(StringType()), False),
+                StructField("isopenbag", ArrayType(StringType()), False),
+                StructField("continueinnextdept", ArrayType(StringType()), False),
+                StructField("statusdescription", ArrayType(StringType()), False),
+                StructField("originalamount", ArrayType(StringType()), False),
+                StructField("originalrate", ArrayType(StringType()), False)
+            ]
+        )
+        @F.pandas_udf(schema, functionType=F.PandasUDFType.GROUPED_MAP)
+        def inputevents_unit(df):
+            patient_id = str(df["subject_id"].iloc[0])
+            visit_id = str(df[self.visit_key].iloc[0])
+            code = df["itemid"].tolist()
+            timestamp = [str(t) for t in df["starttime"].tolist()]
+            amount = df["amount"].tolist()
+            amountuom = df["amountuom"].tolist()
+            rate = df["rate"].tolist()
+            rateuom = df["rateuom"].tolist()
+            orderid = df["orderid"].tolist()
+            linkorderid = df["linkorderid"].tolist()
+            ordercategoryname = df["ordercategoryname"].tolist()
+            secondaryordercategoryname = df["secondaryordercategoryname"].tolist()
+            ordercomponenttypedescription = df["ordercomponenttypedescription"].tolist()
+            ordercategorydescription = df["ordercategorydescription"].tolist()
+            patientweight = df["patientweight"].tolist()
+            totalamount = df["totalamount"].tolist()
+            totalamountuom = df["totalamountuom"].tolist()
+            isopenbag = df["isopenbag"].tolist()
+            continueinnextdept = df["continueinnextdept"].tolist()
+            statusdescription = df["statusdescription"].tolist()
+            originalamount = df["originalamount"].tolist()
+            originalrate = df["originalrate"].tolist()
+            return pd.DataFrame([[
+                patient_id,
+                visit_id,
+                code,
+                timestamp,
+                amount,
+                amountuom,
+                rate,
+                rateuom,
+                orderid,
+                linkorderid,
+                ordercategoryname,
+                secondaryordercategoryname,
+                ordercomponenttypedescription,
+                ordercategorydescription,
+                patientweight,
+                totalamount,
+                totalamountuom,
+                isopenbag,
+                continueinnextdept,
+                statusdescription,
+                originalamount,
+                originalrate
+            ]])
+        
+        pandas_df = spark_df.groupBy(
+            "subject_id", self.visit_key
+        ).apply(inputevents_unit).toPandas()
+        
+        def aggregate_events(row):
+            events = []
+            p_id = row["patient_id"]
+            v_id = row["visit_id"]
+            for (
+                code, timestamp, amount, amountuom, rate, rateuom, orderid, linkorderid,
+                ordercategoryname, secondaryordercategoryname, ordercomponenttypedescription,
+                ordercategorydescription, patientweight, totalamount, totalamountuom, isopenbag,
+                continueinnextdept, statusdescription, originalamount, originalrate
+            ) in zip(
+                row["code"], row["timestamp"], row["amount"], row["amountuom"], row["rate"],
+                row["rateuom"], row["orderid"], row["linkorderid"], row["ordercategoryname"],
+                row["secondaryordercategoryname"], row["ordercomponenttypedescription"],
+                row["ordercategorydescription"], row["patientweight"], row["totalamount"],
+                row["totalamountuom"], row["isopenbag"], row["continueinnextdept"],
+                row["statusdescription"], row["originalamount"], row["originalrate"]
+            ):
+                event = Event(
+                    code=code,
+                    table=table,
+                    vocabulary="MIMIC4_ITEMID",
+                    visit_id=v_id,
+                    patient_id=p_id,
+                    timestamp=strptime(timestamp),
+                    amount=amount,
+                    amountuom=amountuom,
+                    rate=rate,
+                    rateuom=rateuom,
+                    orderid=orderid,
+                    linkorderid=linkorderid,
+                    ordercategoryname=ordercategoryname,
+                    secondaryordercategoryname=secondaryordercategoryname,
+                    ordercomponenttypedescription=ordercomponenttypedescription,
+                    ordercategorydescription=ordercategorydescription,
+                    patientweight=patientweight,
+                    totalamount=totalamount,
+                    totalamountuom=totalamountuom,
+                    isopenbag=isopenbag,
+                    continueinnextdept=continueinnextdept,
+                    statusdescription=statusdescription,
+                    originalamount=originalamount,
+                    originalrate=originalrate
+                )
+                events.append(event)
+            return events
+        
+        # parallel apply to aggregate events
+        aggregated_events = pandas_df.parallel_apply(aggregate_events, axis=1)
+        
+        # summarize the results
+        patients = self._add_events_to_patient_dict(patients, aggregated_events)
+        return patients
 
 if __name__ == "__main__":
     dataset = MIMIC4Dataset(

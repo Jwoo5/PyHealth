@@ -1,6 +1,7 @@
 import logging
 import time
 import os
+import datetime
 from abc import ABC
 from collections import Counter
 from copy import deepcopy
@@ -9,6 +10,8 @@ from typing import Dict, Callable, Tuple, Union, List, Optional, Literal, get_ar
 import pandas as pd
 from tqdm import tqdm
 from pandarallel import pandarallel
+from pyspark.sql import SparkSession, DataFrame
+import pyspark.sql.functions as F
 
 from pyhealth.data import Patient, Event
 from pyhealth.datasets.sample_dataset import SampleEHRDataset
@@ -445,6 +448,8 @@ class BaseEHRSparkDataset(BaseEHRDataset):
         root,
         tables,
         visit_unit: VISIT_UNIT_CHOICES = "hospital",
+        observation: int = 12,
+        num_threads: int = 8,
         **kwargs
     ):
 
@@ -453,12 +458,108 @@ class BaseEHRSparkDataset(BaseEHRDataset):
             f"be one of these choices: {get_args(VISIT_UNIT_CHOICES)}"
         )
         self.visit_unit = visit_unit
+        self.observation = observation
+        self.num_threads=num_threads
 
         super().__init__(
             root=root,
             tables=tables,
             **kwargs
         )
+
+    def filter_events(
+        self,
+        spark: SparkSession,
+        spark_df: DataFrame,
+        timestamp_key: str,
+        joined_table: str = None,
+        select: List[str] = None,
+        on: str = None,
+        should_infer_icustay_id: bool = False,
+    ):
+        if joined_table is not None:
+            joined_df = pd.read_csv(os.path.join(self.root, f"{joined_table}.csv"))
+            if self.encounter_key is not None:
+                joined_df.loc[:, self.encounter_key] = pd.to_datetime(
+                    joined_df[self.encounter_key], infer_datetime_format=True
+                )
+            if self.discharge_key is not None:
+                joined_df.loc[:, self.discharge_key] = pd.to_datetime(
+                    joined_df[self.discharge_key], infer_datetime_format=True
+                )
+            joined_df = spark.createDataFrame(joined_df)
+
+            spark_df = spark_df.join(joined_df.select(*select), on=on, how="inner")
+
+        if should_infer_icustay_id:
+            spark_df = spark_df.filter(
+                (F.col(self.encounter_key) <= F.col(timestamp_key))
+                & (F.col(timestamp_key) <= F.col(self.discharge_key))
+            )
+        else:
+            if self.encounter_key is None:
+                spark_df = spark_df.filter(0 <= F.col(timestamp_key))
+            else:
+                spark_df = spark_df.filter(F.col(self.encounter_key) <= F.col(timestamp_key))
+
+        # filter by observation window
+        if self.observation is not None and self.observation >= 0:
+            if self.encounter_key is None:
+                spark_df = spark_df.filter(F.col(timestamp_key) <= 60 * self.observation)
+            else:
+                spark_df = spark_df.filter(
+                    (F.col(timestamp_key) - F.col(self.encounter_key))
+                    <= datetime.timedelta(hours=self.observation)
+                )
+
+        return spark_df
+
+    def parse_basic_info(self, patients: Dict[str, Patient]) -> Dict[str, Patient]:
+        raise NotImplementedError("Dataset must implement the parse_basic_info method")
+
+    def parse_tables(self) -> Dict[str, Patient]:
+        """Parses the tables in `self.tables` and return a dict of patients.
+
+        Will be called in `self.__init__()` if cache file does not exist or
+            refresh_cache is True.
+
+        This function will first call `self.parse_basic_info()` to parse the
+        basic patient information, and then call `self.parse_[table_name]()` to
+        parse the table with name `table_name`. Both `self.parse_basic_info()` and
+        `self.parse_[table_name]()` should be implemented in the subclass.
+
+        Returns:
+           A dict mapping patient_id to `Patient` object.
+        """
+        pandarallel.initialize(progress_bar=False)
+
+        spark = SparkSession.builder.master("local[{}]".format(self.num_threads))
+        spark = spark.config("spark.driver.memory", "100g")
+        spark = spark.config("spark.driver.maxResultSize", "10g")
+        spark = spark.config("spark.network.timeout", "100s")
+        spark = spark.getOrCreate()
+
+        patients: Dict[str, Patient] = dict()
+        
+        tic = time.time()
+        patients = self.parse_basic_info(patients)
+        print(
+            "finish basic patient information parsing : {}s".format(time.time() - tic)
+        )
+        # process clinical tables
+        for table in self.tables:
+            try:
+                # use lower case for function name
+                tic = time.time()
+                parse_table = getattr(self, f"parse_{table.lower()}")
+            except AttributeError:
+                raise NotImplementedError(
+                    f"Parser for table {table} is not implemented yet."
+                )
+            patients = parse_table(patients, spark)
+            print(f"finish parsing {table} : {time.time() - tic}s")
+
+        return patients
 
     def set_task(
         self,
