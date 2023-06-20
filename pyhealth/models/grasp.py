@@ -1,19 +1,17 @@
-from typing import List, Tuple, Dict, Optional
+import copy
+import math
+import random
+from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.utils.rnn as rnn_utils
+from sklearn.neighbors import kneighbors_graph
 
 from pyhealth.datasets import SampleEHRDataset
-from pyhealth.models import BaseModel
+from pyhealth.models import BaseModel, ConCareLayer, RNNLayer
 from pyhealth.models.utils import get_last_visit
-from pyhealth.models import ConCareLayer, RNNLayer
-
-from sklearn.neighbors import kneighbors_graph
-import math
-import copy
-import random
-import numpy as np
 
 
 def random_init(dataset, num_centers, device):
@@ -81,6 +79,7 @@ def cluster(dataset, num_centers, device):
     codes = compute_codes(dataset, centers)
     num_iterations = 0
     while True:
+        num_iterations += 1
         centers = update_centers(dataset, codes, num_centers, device)
         new_codes = compute_codes(dataset, centers)
         # Waiting until the clustering stops updating altogether
@@ -157,7 +156,7 @@ class GRASPLayer(nn.Module):
         hidden_dim: int = 128,
         cluster_num: int = 2,
         dropout: int = 0.5,
-        block: int = "ConCare",
+        block: str = "ConCare",
     ):
         super(GRASPLayer, self).__init__()
 
@@ -224,7 +223,7 @@ class GRASPLayer(nn.Module):
         if self.block == "ConCare":
             hidden_t, _ = self.backbone(input, mask=mask, static=static)
         else:
-            hidden_t, _ = self.backbone(input, mask)
+            _, hidden_t = self.backbone(input, mask)
         hidden_t = torch.squeeze(hidden_t, 0)
 
         centers, codes = cluster(hidden_t, self.cluster_num, input.device)
@@ -265,7 +264,7 @@ class GRASPLayer(nn.Module):
         x: torch.tensor,
         static: Optional[torch.tensor] = None,
         mask: Optional[torch.tensor] = None,
-    ) -> Tuple[torch.tensor]:
+    ) -> torch.tensor:
         """Forward propagation.
 
         Args:
@@ -387,9 +386,15 @@ class GRASP(BaseModel):
         >>>
         >>> ret = model(**data_batch)
         >>> print(ret)
-        {'loss': tensor(0.7015, grad_fn=<BinaryCrossEntropyWithLogitsBackward0>), 'y_prob': tensor([[0.5124],
-        [0.5042]], grad_fn=<SigmoidBackward0>), 'y_true': tensor([[0.],
-        [1.]])}
+        {
+            'loss': tensor(0.6896, grad_fn=<BinaryCrossEntropyWithLogitsBackward0>),
+            'y_prob': tensor([[0.4983],
+                        [0.4947]], grad_fn=<SigmoidBackward0>),
+            'y_true': tensor([[1.],
+                        [0.]]),
+            'logit': tensor([[-0.0070],
+                        [-0.0213]], grad_fn=<AddmmBackward0>)
+        }
         >>>
 
     """
@@ -404,7 +409,6 @@ class GRASP(BaseModel):
         static_key: Optional[str] = None,
         embedding_dim: int = 128,
         hidden_dim: int = 128,
-        cluster_num: int = 10,
         **kwargs,
     ):
         super(GRASP, self).__init__(
@@ -424,6 +428,8 @@ class GRASP(BaseModel):
             raise ValueError("cluster_num is required for small dataset, default 12")
         if "cluster_num" in kwargs and kwargs["cluster_num"] > len(dataset):
             raise ValueError("cluster_num must be no larger than dataset size")
+
+        cluster_num = kwargs.get("cluster_num", 12)
 
         # the key of self.feat_tokenizers only contains the code based inputs
         self.feat_tokenizers = {}
@@ -470,7 +476,6 @@ class GRASP(BaseModel):
                     input_dim=embedding_dim,
                     static_dim=self.static_dim,
                     hidden_dim=self.hidden_dim,
-                    cluster_num=cluster_num,
                     **kwargs,
                 )
             else:
@@ -478,7 +483,6 @@ class GRASP(BaseModel):
                     input_dim=input_info["len"],
                     static_dim=self.static_dim,
                     hidden_dim=self.hidden_dim,
-                    cluster_num=cluster_num,
                     **kwargs,
                 )
 
@@ -515,7 +519,7 @@ class GRASP(BaseModel):
                 # (patient, event, embedding_dim)
                 x = self.embeddings[feature_key](x)
                 # (patient, event)
-                mask = torch.sum(x, dim=2) != 0
+                mask = torch.any(x !=0, dim=2)
 
             # for case 2: [[code1, code2], [code3, ...], ...]
             elif (dim_ == 3) and (type_ == str):
@@ -529,7 +533,7 @@ class GRASP(BaseModel):
                 # (patient, visit, embedding_dim)
                 x = torch.sum(x, dim=2)
                 # (patient, visit)
-                mask = torch.sum(x, dim=2) != 0
+                mask = torch.any(x !=0, dim=2)
 
             # for case 3: [[1.5, 2.0, 0.0], ...]
             elif (dim_ == 2) and (type_ in [float, int]):
@@ -574,11 +578,15 @@ class GRASP(BaseModel):
         y_true = self.prepare_labels(kwargs[self.label_key], self.label_tokenizer)
         loss = self.get_loss_function()(logits, y_true)
         y_prob = self.prepare_y_prob(logits)
-        return {
+        results = {
             "loss": loss,
             "y_prob": y_prob,
             "y_true": y_true,
+            "logit": logits,
         }
+        if kwargs.get("embed", False):
+            results["embed"] = patient_emb
+        return results
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-from typing import List, Tuple, Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -346,11 +346,12 @@ class AdaCare(BaseModel):
         >>>
         >>> ret = model(**data_batch)
         >>> print(ret)
-        {'loss': tensor(0.7234, grad_fn=<BinaryCrossEntropyWithLogitsBackward0>), 'feature_importance': tensor(...), 'conv_feature_importance': tensor(...), 'y_prob': tensor([[0.5423],
-                [0.5142]], grad_fn=<SigmoidBackward0>), 'y_true': tensor([[0.],
-                [1.]])}
-        >>>
-
+        {
+            'loss': tensor(0.7167, grad_fn=<BinaryCrossEntropyWithLogitsBackward0>),
+            'y_prob': tensor([[0.5009], [0.4779]], grad_fn=<SigmoidBackward0>),
+            'y_true': tensor([[0.], [1.]]),
+            'logit': tensor([[ 0.0036], [-0.0886]], grad_fn=<AddmmBackward0>)
+        }
     """
 
     def __init__(
@@ -459,7 +460,7 @@ class AdaCare(BaseModel):
                 # (patient, event, embedding_dim)
                 x = self.embeddings[feature_key](x)
                 # (patient, event)
-                mask = torch.sum(x, dim=2) != 0
+                mask = torch.any(x !=0, dim=2)
 
             # for case 2: [[code1, code2], [code3, ...], ...]
             elif (dim_ == 3) and (type_ == str):
@@ -473,7 +474,7 @@ class AdaCare(BaseModel):
                 # (patient, visit, embedding_dim)
                 x = torch.sum(x, dim=2)
                 # (patient, visit)
-                mask = torch.sum(x, dim=2) != 0
+                mask = torch.any(x !=0, dim=2)
 
             # for case 3: [[1.5, 2.0, 0.0], ...]
             elif (dim_ == 2) and (type_ in [float, int]):
@@ -515,18 +516,15 @@ class AdaCare(BaseModel):
         y_true = self.prepare_labels(kwargs[self.label_key], self.label_tokenizer)
         loss = self.get_loss_function()(logits, y_true)
         y_prob = self.prepare_y_prob(logits)
-        # return {
-        #     "loss": loss,
-        #     "feature_importance": feature_importance,
-        #     "conv_feature_importance": conv_feature_importance,
-        #     "y_prob": y_prob,
-        #     "y_true": y_true,
-        # }
-        return {
+        results = {
             "loss": loss,
             "y_prob": y_prob,
             "y_true": y_true,
+            "logit": logits,
         }
+        if kwargs.get("embed", False):
+            results["embed"] = patient_emb
+        return results
 
 
 if __name__ == "__main__":

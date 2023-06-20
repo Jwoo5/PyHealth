@@ -1,16 +1,14 @@
-from typing import List, Tuple, Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.utils.rnn as rnn_utils
+from torch.nn.utils import weight_norm
 
 from pyhealth.datasets import SampleEHRDataset
 from pyhealth.models import BaseModel
-from torch.nn.utils import weight_norm
-
-import numpy as np
 from pyhealth.models.utils import get_last_visit
-
 
 # VALID_OPERATION_LEVEL = ["visit", "event"]
 
@@ -277,9 +275,15 @@ class TCN(BaseModel):
         >>>
         >>> ret = model(**data_batch)
         >>> print(ret)
-        {'loss': tensor(0.7664, grad_fn=<BinaryCrossEntropyWithLogitsBackward0>), 'y_prob': tensor([[0.4714],
-                [0.4085]], grad_fn=<SigmoidBackward0>), 'y_true': tensor([[0.],
-                [1.]])}
+        {
+            'loss': tensor(1.1641, grad_fn=<BinaryCrossEntropyWithLogitsBackward0>),
+            'y_prob': tensor([[0.6837],
+                            [0.3081]], grad_fn=<SigmoidBackward0>),
+            'y_true': tensor([[0.],
+                            [1.]]),
+            'logit': tensor([[ 0.7706],
+                            [-0.8091]], grad_fn=<AddmmBackward0>)
+        }
         >>>
 
 
@@ -376,7 +380,7 @@ class TCN(BaseModel):
                 # (patient, event, embedding_dim)
                 x = self.embeddings[feature_key](x)
                 # (patient, event)
-                mask = torch.sum(x, dim=2) != 0
+                mask = torch.any(x !=0, dim=2)
 
             # for case 2: [[code1, code2], [code3, ...], ...]
             elif (dim_ == 3) and (type_ == str):
@@ -390,7 +394,7 @@ class TCN(BaseModel):
                 # (patient, visit, embedding_dim)
                 x = torch.sum(x, dim=2)
                 # (patient, visit)
-                mask = torch.sum(x, dim=2) != 0
+                mask = torch.any(x !=0, dim=2)
 
             # for case 3: [[1.5, 2.0, 0.0], ...]
             elif (dim_ == 2) and (type_ in [float, int]):
@@ -427,11 +431,15 @@ class TCN(BaseModel):
         y_true = self.prepare_labels(kwargs[self.label_key], self.label_tokenizer)
         loss = self.get_loss_function()(logits, y_true)
         y_prob = self.prepare_y_prob(logits)
-        return {
+        results = {
             "loss": loss,
             "y_prob": y_prob,
             "y_true": y_true,
+            "logit": logits,
         }
+        if kwargs.get("embed", False):
+            results["embed"] = patient_emb
+        return results
 
 
 if __name__ == "__main__":
