@@ -1,5 +1,6 @@
 from .base_ehr_dataset import BaseEHRDataset, BaseEHRSparkDataset
 from .base_signal_dataset import BaseSignalDataset
+from .cardiology import CardiologyDataset
 from .eicu import eICUDataset, eICUSparkDataset
 from .mimic3 import MIMIC3Dataset, MIMIC3SparkDataset
 from .mimic4 import MIMIC4Dataset, MIMIC4SparkDataset
