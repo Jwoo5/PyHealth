@@ -615,6 +615,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("seq_num", ArrayType(StringType()), False),
             ]
@@ -624,6 +625,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             patient_id = str(df["SUBJECT_ID"].iloc[0])
             visit_id = str(df[self.visit_key].iloc[0])
             code = df["ICD9_CODE"].tolist()
+            name = ["ICD9_CODE"] * len(code)
             # NOTE: diagnosis codes are generated at the end of the hospital stay.
             timestamp = [str(t) for t in df["DISCHTIME"].tolist()]
             seq_num = df["SEQ_NUM"].tolist()
@@ -631,6 +633,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 seq_num
             ]])
@@ -643,9 +646,12 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             events = []
             p_id = row["patient_id"]
             v_id = row["visit_id"]
-            for code, timestamp, seq_num in zip(row["code"], row["timestamp"], row["seq_num"]):
+            for code, name, timestamp, seq_num in zip(
+                row["code"], row["name"], row["timestamp"], row["seq_num"]
+            ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="ICD9CM",
                     visit_id=v_id,
@@ -716,6 +722,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("seq_num", ArrayType(StringType()), False),
             ]
@@ -725,6 +732,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             patient_id = str(df["SUBJECT_ID"].iloc[0])
             visit_id = str(df[self.visit_key].iloc[0])
             code = df["ICD9_CODE"].tolist()
+            name = ["ICD9_CODE"] * len(code)
             # NOTE: diagnosis codes are generated at the end of the hospital stay.
             timestamp = [str(t) for t in df["DISCHTIME"].tolist()]
             seq_num = df["SEQ_NUM"].tolist()
@@ -732,6 +740,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 seq_num
             ]])
@@ -744,9 +753,12 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             events = []
             p_id = row["patient_id"]
             v_id = row["visit_id"]
-            for code, timestamp, seq_num in zip(row["code"], row["timestamp"], row["seq_num"]):
+            for code, name, timestamp, seq_num in zip(
+                row["code"], row["name"], row["timestamp"], row["seq_num"]
+            ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="ICD9PROC",
                     visit_id=v_id,
@@ -823,6 +835,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("drug_type", ArrayType(StringType()), False),
                 StructField("drug", ArrayType(StringType()), False),
@@ -843,6 +856,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             patient_id = str(df["SUBJECT_ID"].iloc[0])
             visit_id = str(df[self.visit_key].iloc[0])
             code = df["NDC"].tolist()
+            name = ["NDC"] * len(code)
             timestamp = [str(t) for t in df["STARTDATE"].tolist()]
             drug_type = df["DRUG_TYPE"].tolist()
             drug = df["DRUG"].tolist()
@@ -860,6 +874,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 drug_type,
                 drug,
@@ -884,17 +899,18 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, drug_type, drug, drug_name_poe, drug_name_generic,
+                code, name, timestamp, drug_type, drug, drug_name_poe, drug_name_generic,
                 formulary_drug_cd, gsn, prod_strength, dose_val_rx, dose_unit_rx, form_val_disp,
                 form_unit_disp, route
             ) in zip(
-                row["code"], row["timestamp"], row["drug_type"], row["drug"], row["drug_name_poe"],
-                row["drug_name_generic"], row["formulary_drug_cd"], row["gsn"], row["prod_strength"],
-                row["dose_val_rx"], row["dose_unit_rx"], row["form_val_disp"], row["form_unit_disp"],
-                row["route"]
+                row["code"], row["name"], row["timestamp"], row["drug_type"], row["drug"],
+                row["drug_name_poe"], row["drug_name_generic"], row["formulary_drug_cd"],
+                row["gsn"], row["prod_strength"], row["dose_val_rx"], row["dose_unit_rx"],
+                row["form_val_disp"], row["form_unit_disp"], row["route"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="NDC",
                     visit_id=v_id,
@@ -978,6 +994,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("value", ArrayType(StringType()), True),
                 StructField("valuenum", ArrayType(StringType()), True),
@@ -990,13 +1007,14 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             patient_id = str(df["SUBJECT_ID"].iloc[0])
             visit_id = str(df[self.visit_key].iloc[0])
             code = df["ITEMID"].tolist()
+            name = ["ITEMID"] * len(code)
             timestamp = [str(t) for t in df["CHARTTIME"].tolist()]
             value = df["VALUE"].tolist()
             valuenum = df["VALUENUM"].tolist()
             valueuom = df["VALUEUOM"].tolist()
             flag = df["FLAG"].tolist()
             return pd.DataFrame(
-                [[patient_id, visit_id, code, timestamp, value, valuenum, valueuom, flag]]
+                [[patient_id, visit_id, code, name, timestamp, value, valuenum, valueuom, flag]]
             )
 
         pandas_df = spark_df.groupBy("SUBJECT_ID", self.visit_key).apply(lab_unit).toPandas()
@@ -1005,11 +1023,13 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             events = []
             p_id = row["patient_id"]
             v_id = row["visit_id"]
-            for code, timestamp, value, valuenum, valueuom, flag in zip(
-                row["code"], row["timestamp"], row["value"], row["valuenum"], row["valueuom"], row["flag"]
+            for code, name, timestamp, value, valuenum, valueuom, flag in zip(
+                row["code"], row["name"], row["timestamp"], row["value"], row["valuenum"],
+                row["valueuom"], row["flag"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="MIMIC3_ITEMID",
                     visit_id=v_id,
@@ -1090,6 +1110,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("amount", ArrayType(StringType()), False),
                 StructField("amountuom", ArrayType(StringType()), False),
@@ -1119,6 +1140,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             patient_id = str(df["SUBJECT_ID"].iloc[0])
             visit_id = str(df[self.visit_key].iloc[0])
             code = df["ITEMID"].tolist()
+            name = ["ITEMID"] * len(code)
             timestamp = [str(t) for t in df["STARTTIME"].tolist()]
             amount = df["AMOUNT"].tolist()
             amountuom = df["AMOUNTUOM"].tolist()
@@ -1145,6 +1167,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 amount,
                 amountuom,
@@ -1178,22 +1201,24 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, amount, amountuom, rate, rateuom, orderid, linkorderid, ordercategoryname,
+                code, name, timestamp, amount, amountuom, rate, rateuom, orderid, linkorderid, ordercategoryname,
                 secondaryordercategoryname, ordercomponenttypedescription, ordercategorydescription,
                 patientweight, totalamount, totalamountuom, isopenbag, continueinnexdept,
                 cancelreason, comments_editedby, comments_canceledby, comments_date,
                 originalamount, originalrate
             ) in zip(
-                row["code"], row["timestamp"], row["amount"], row["amountuom"], row["rate"],
-                row["rateuom"], row["orderid"], row["linkorderid"], row["ordercategoryname"],
-                row["secondaryordercategoryname"], row["ordercomponenttypedescription"],
-                row["ordercategorydescription"], row["patientweight"], row["totalamount"],
-                row["totalamountuom"], row["isopenbag"], row["continueinnextdept"],
-                row["cancelreason"], row["comments_editedby"], row["comments_canceledby"],
-                row["comments_date"], row["originalamount"], row["originalrate"]
+                row["code"], row["name"], row["timestamp"], row["amount"], row["amountuom"],
+                row["rate"], row["rateuom"], row["orderid"], row["linkorderid"],
+                row["ordercategoryname"], row["secondaryordercategoryname"],
+                row["ordercomponenttypedescription"], row["ordercategorydescription"],
+                row["patientweight"], row["totalamount"], row["totalamountuom"], row["isopenbag"],
+                row["continueinnextdept"], row["cancelreason"], row["comments_editedby"],
+                row["comments_canceledby"], row["comments_date"], row["originalamount"],
+                row["originalrate"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="MIMIC3_ITEMID",
                     visit_id=v_id,
@@ -1288,6 +1313,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("amount", ArrayType(StringType()), False),
                 StructField("amountuom", ArrayType(StringType()), False),
@@ -1311,6 +1337,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             patient_id = str(df["SUBJECT_ID"].iloc[0])
             visit_id = str(df[self.visit_key].iloc[0])
             code = df["ITEMID"].tolist()
+            name = ["ITEMID"] * len(code)
             timestamp = [str(t) for t in df["CHARTTIME"].tolist()]
             amount = df["AMOUNT"].tolist()
             amountuom = df["AMOUNTUOM"].tolist()
@@ -1331,6 +1358,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 amount,
                 amountuom,
@@ -1358,17 +1386,19 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, amount, amountuom, rate, rateuom, cgid, orderid, linkorderid,
+                code, name, timestamp, amount, amountuom, rate, rateuom, cgid, orderid, linkorderid,
                 stopped, newbottle, originalamount, originalamountuom, originalroute, originalrate,
                 originalrateuom, originalsite
             ) in zip(
-                row["code"], row["timestamp"], row["amount"], row["amountuom"], row["rate"],
-                row["rateuom"], row["cgid"], row["orderid"], row["linkorderid"], row["stopped"],
-                row["newbottle"], row["originalamount"], row["originalamountuom"], row["originalroute"],
-                row["originalrate"], row["originalrateuom"], row["originalsite"]
+                row["code"], code["name"], row["timestamp"], row["amount"], row["amountuom"],
+                row["rate"], row["rateuom"], row["cgid"], row["orderid"], row["linkorderid"],
+                row["stopped"], row["newbottle"], row["originalamount"], row["originalamountuom"],
+                row["originalroute"], row["originalrate"], row["originalrateuom"],
+                row["originalsite"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="MIMIC3_ITEMID",
                     visit_id=v_id,
@@ -1457,6 +1487,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("value", ArrayType(StringType()), False),
                 StructField("valuenum", ArrayType(StringType()), False),
@@ -1472,6 +1503,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             patient_id = str(df["SUBJECT_ID"].iloc[0])
             visit_id = str(df[self.visit_key].iloc[0])
             code = df["ITEMID"].tolist()
+            name = ["ITEMID"] * len(code)
             timestamp = [str(t) for t in df["CHARTTIME"].tolist()]
             value = df["VALUE"].tolist()
             valuenum = df["VALUENUM"].tolist()
@@ -1484,6 +1516,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 value,
                 valuenum,
@@ -1503,13 +1536,14 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, value, valuenum, valueuom, warning, error, resultstatus, stopped
+                code, name, timestamp, value, valuenum, valueuom, warning, error, resultstatus, stopped
             ) in zip(
-                row["code"], row["timestamp"], row["value"], row["valuenum"], row["valueuom"],
-                row["warning"], row["error"], row["resultstatus"], row["stopped"]
+                row["code"], row["name"], row["timestamp"], row["value"], row["valuenum"],
+                row["valueuom"], row["warning"], row["error"], row["resultstatus"], row["stopped"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="MIMIC3_ITEMID",
                     visit_id=v_id,
@@ -1590,6 +1624,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("value", ArrayType(StringType()), False),
                 StructField("valueuom", ArrayType(StringType()), False),
@@ -1603,6 +1638,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             patient_id = str(df["SUBJECT_ID"].iloc[0])
             visit_id = str(df[self.visit_key].iloc[0])
             code = df["ITEMID"].tolist()
+            name = ["ITEMID"] * len(code)
             timestamp = [str(t) for t in df["CHARTTIME"].tolist()]
             value = df["VALUE"].tolist()
             valueuom = df["VALUEUOM"].tolist()
@@ -1613,6 +1649,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 value,
                 valueuom,
@@ -1630,13 +1667,14 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, value, valueuom, stopped, newbottle, iserror
+                code, name, timestamp, value, valueuom, stopped, newbottle, iserror
             ) in zip(
-                row["code"], row["timestamp"], row["value"], row["valueuom"],
+                row["code"], row["name"], row["timestamp"], row["value"], row["valueuom"],
                 row["stopped"], row["newbottle"], row["iserror"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="MIMIC3_ITEMID",
                     visit_id=v_id,
@@ -1715,6 +1753,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("value", ArrayType(StringType()), False),
                 StructField("valueuom", ArrayType(StringType()), False),
@@ -1739,6 +1778,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             patient_id = str(df["SUBJECT_ID"].iloc[0])
             visit_id = str(df[self.visit_key].iloc[0])
             code = df["ITEMID"].tolist()
+            name = ["ITEMID"] * len(code)
             timestamp = [str(t) for t in df["STARTTIME"].tolist()]
             value = df["VALUE"].tolist()
             valueuom = df["VALUEUOM"].tolist()
@@ -1760,6 +1800,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 value,
                 valueuom,
@@ -1788,13 +1829,13 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, value, valueuom, location, locationcategory, orderid, linkorderid,
-                ordercategoryname, secondaryordercategoryname, ordercategorydescription, isopenbag,
-                continueinnextdept, cancelreason, statusdescription, comments_editedby,
-                comments_canceledby, comments_date
+                code, name, timestamp, value, valueuom, location, locationcategory, orderid,
+                linkorderid, ordercategoryname, secondaryordercategoryname,
+                ordercategorydescription, isopenbag, continueinnextdept, cancelreason,
+                statusdescription, comments_editedby, comments_canceledby, comments_date
             ) in zip(
-                row["code"], row["timestamp"], row["value"],row["vluaeuom"], row["location"],
-                row["locationcategory"], row["orderid"], row["linkorderid"],
+                row["code"], row["name"], row["timestamp"], row["value"],row["vluaeuom"],
+                row["location"], row["locationcategory"], row["orderid"], row["linkorderid"],
                 row["ordercategoryname"], row["secondaryordercategoryname"],
                 row["ordercategorydescription"], row["isopenbag"], row["continueinnextdept"],
                 row["cancelreason"], row["statusdescription"], row["comments_editedby"],
@@ -1802,6 +1843,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="MIMIC3_ITEMID",
                     visit_id=v_id,
@@ -1891,6 +1933,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("spec_itemid", ArrayType(StringType()), False),
                 StructField("spec_type_desc", ArrayType(StringType()), False),
@@ -1910,6 +1953,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             patient_id = str(df["SUBJECT_ID"].iloc[0])
             visit_id = str(df[self.visit_key].iloc[0])
             code = [None] * len(df)
+            name = [None] * len(code)
             timestamp = [str(t) for t in df["CHARTTIME"].tolist()]
             spec_itemid = df["SPEC_ITEMID"].tolist()
             spec_type_desc = df["SPEC_TYPE_DESC"].tolist()
@@ -1926,6 +1970,7 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 spec_itemid,
                 spec_type_desc,
@@ -1949,17 +1994,18 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, spec_itemid, spec_type_desc, org_itemid, org_name, isolate_num,
-                ab_itemid, ab_name, dilution_text, dilution_comparison, diluition_value,
-                interpretation
+                code, name, timestamp, spec_itemid, spec_type_desc, org_itemid, org_name,
+                isolate_num, ab_itemid, ab_name, dilution_text, dilution_comparison,
+                diluition_value, interpretation
             ) in zip(
-                row["code"], row["timestamp"], row["spec_itemid"], row["spec_type_desc"],
-                row["org_itemid"], row["org_name"], row["isolate_num"], row["ab_itemid"],
-                row["ab_name"], row["dilution_text"], row["dilution_comparison"],
+                row["code"], row["name"], row["timestamp"], row["spec_itemid"],
+                row["spec_type_desc"], row["org_itemid"], row["org_name"], row["isolate_num"],
+                row["ab_itemid"], row["ab_name"], row["dilution_text"], row["dilution_comparison"],
                 row["dilution_value"], row["interpretation"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="MIMIC3_ITEMID",
                     visit_id=v_id,

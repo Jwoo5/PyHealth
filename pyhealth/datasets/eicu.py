@@ -666,6 +666,11 @@ class eICUSparkDataset(BaseEHRSparkDataset):
     We further support the following tables:
         - diagnosis: contains ICD diagnoses (ICD9CM and ICD10CM code)
             and diagnosis information (under attr_dict) for patients.
+            Note that unlike :class:`eICUDataset`, diagnoses codes are inserted
+            as it is as a form of texts, which means there could be 1) `None` code
+            or 2) two codes in one text representation (e.g., "518.81, J96.00").
+            In the first case, `vocabulary` is also set to `None`. In the other case,
+            `vocabulary` is set to a tuple of 2-length, corresponded to each code.
         - treatment: contains treatment information (eICU_TREATMENTSTRING code)
             for patients.
         - medication: contains medication related order entries (eICU_DRUGNAME
@@ -908,12 +913,23 @@ class eICUSparkDataset(BaseEHRSparkDataset):
         icd10cm = ICD10CM()
         
         def icd9cm_or_icd10cm(code):
-            if code in icd9cm:
-                return "ICD9CM"
-            elif code in icd10cm:
-                return "ICD10CM"
+            if code is None:
+                return None
             else:
-                return "UNKNOWN"
+                code = [c.strip() for c in code.split(",")]
+                output = []
+                for c in code:                    
+                    if c in icd9cm:
+                        output.append("ICD9CM")
+                    elif c in icd10cm:
+                        output.append("ICD10CM")
+                    else:
+                        output.append("UNKNOWN")
+            
+            if len(output) == 1:
+                output = output[0]
+            
+            return output
         
         table = "diagnosis"
         # read table
@@ -935,6 +951,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("activeupondischarge", ArrayType(StringType()), False),
                 StructField("diagnosisstring", ArrayType(StringType()), False),
@@ -945,12 +962,8 @@ class eICUSparkDataset(BaseEHRSparkDataset):
         def diagnosis_unit(df):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
-            code = sum(
-                [
-                    [c.strip() for c in codes.split(",")]
-                    for codes in df["icd9code"].tolist() if codes is not None
-                ], []
-            )
+            code = [c for c in df["icd9code"].tolist()]
+            name = ["icd9code"] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["diagnosisoffset"].tolist()
@@ -962,6 +975,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 activeupondischarge,
                 diagnosisstring,
@@ -974,13 +988,14 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             events = []
             p_id = row["patient_id"]
             v_id = row["visit_id"]
-            for code, timestamp, activeupondischarge, diagnosisstring, diagnosispriority in zip(
-                row["code"], row["timestamp"], row["activeupondischarge"], row["diagnosisstring"],
-                row["diagnosispriority"]
+            for code, name, timestamp, activeupondischarge, diagnosisstring, diagnosispriority in zip(
+                row["code"], row["name"], row["timestamp"], row["activeupondischarge"],
+                row["diagnosisstring"], row["diagnosispriority"]
             ):
                 vocab = icd9cm_or_icd10cm(code)
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary=vocab,
                     visit_id=v_id,
@@ -1040,6 +1055,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("activeupondischarge", ArrayType(StringType()), False),
             ]
@@ -1049,6 +1065,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = df["treatmentstring"].tolist()
+            name = ["treatmentstring"] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["treatmentoffset"].tolist()
@@ -1058,6 +1075,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 activeupondischarge
             ]])
@@ -1068,11 +1086,12 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             events = []
             p_id = row["patient_id"]
             v_id = row["visit_id"]
-            for code, timestamp, activeupondischarge in zip(
-                row["code"], row["timestamp"], row["activeupondischarge"]
+            for code, name, timestamp, activeupondischarge in zip(
+                row["code"], row["name"], row["timestamp"], row["activeupondischarge"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eICU_TREATMENTSTRING",
                     visit_id=v_id,
@@ -1130,6 +1149,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("drugorderoffset", ArrayType(StringType()), False),
                 StructField("drugivadmixture", ArrayType(StringType()), False),
@@ -1149,6 +1169,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = df["drugname"].tolist()
+            name = ["drugname"] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["drugstartoffset"].tolist()
@@ -1168,6 +1189,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 drugorderoffset,
                 drugivadmixture,
@@ -1189,15 +1211,17 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, drugorderoffset, drugivadmixture, drugordercancelled,
+                code, name, timestamp, drugorderoffset, drugivadmixture, drugordercancelled,
                 drughiclseqno, dosage, routeadmin, frequency, loadingdose, prn, drugstopoffset, gtc
             ) in zip(
-                row["code"], row["timestamp"], row["drugorderoffset"], row["drugivadmixture"],
-                row["drugordercancelled"], row["drughiclseqno"], row["dosage"], row["routeadmin"],
-                row["frequency"], row["loadingdose"], row["prn"], row["drugstopoffset"], row["gtc"]
+                row["code"], row["name"], row["timestamp"], row["drugorderoffset"],
+                row["drugivadmixture"], row["drugordercancelled"], row["drughiclseqno"],
+                row["dosage"], row["routeadmin"], row["frequency"], row["loadingdose"],
+                row["prn"], row["drugstopoffset"], row["gtc"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eICU_DRUGNAME",
                     visit_id=v_id,
@@ -1265,6 +1289,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("labtypeid", ArrayType(StringType()), False),
                 StructField("labresult", ArrayType(StringType()), False),
@@ -1279,6 +1304,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = df["labname"].tolist()
+            name = ["labname"] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["labresultoffset"].tolist()
@@ -1293,6 +1319,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 labtypeid,
                 labresult,
@@ -1309,15 +1336,16 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, labtypeid, labresult, labresulttext,
+                code, name, timestamp, labtypeid, labresult, labresulttext,
                 labmeasurenamesystem, labmeasurenameinterface, labresultrevisedoffset
             ) in zip(
-                row["code"], row["timestamp"], row["labtypeid"], row["labresult"],
+                row["code"], row["name"], row["timestamp"], row["labtypeid"], row["labresult"],
                 row["labresulttext"], row["labmeasurenamesystem"], row["labmeasurenameinterface"],
                 row["labresultrevisedoffset"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eICU_LABNAME",
                     visit_id=v_id,
@@ -1380,6 +1408,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("physicalexamvalue", ArrayType(StringType()), False),
                 StructField("physicalexamtext", ArrayType(StringType()), False),
@@ -1390,6 +1419,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = df["physicalexampath"].tolist()
+            name = ["physicalexampath"] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["physicalexamoffset"].tolist()
@@ -1400,6 +1430,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 physicalexamvalue,
                 physicalexamtext
@@ -1411,11 +1442,13 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             events = []
             p_id = row["patient_id"]
             v_id = row["visit_id"]
-            for code, timestamp, physicalexamvalue, physicalexamtext in zip(
-                row["code"], row["timestamp"], row["physicalexamvalue"], row["physicalexamtext"]
+            for code, name, timestamp, physicalexamvalue, physicalexamtext in zip(
+                row["code"], row["name"], row["timestamp"], row["physicalexamvalue"],
+                row["physicalexamtext"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eICU_PHYSICALEXAMPATH",
                     visit_id=v_id,
@@ -1474,6 +1507,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("admitdxname", ArrayType(StringType()), False),
                 StructField("admitdxtext", ArrayType(StringType()), False),
@@ -1484,6 +1518,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = df["admitdxpath"].tolist()
+            name = ["admitdxpath"] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["admitdxenteredoffset"].tolist()
@@ -1494,6 +1529,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 admitdxname,
                 admitdxtext
@@ -1505,11 +1541,12 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             events = []
             p_id = row["patient_id"]
             v_id = row["visit_id"]
-            for code, timestamp, admitdxname, admitdxtext in zip(
-                row["code"], row["timestamp"], row["admitdxname"], row["admitdxtext"]
+            for code, name, timestamp, admitdxname, admitdxtext in zip(
+                row["code"], row["name"], row["timestamp"], row["admitdxname"], row["admitdxtext"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eicu_ADMITDXPATH",
                     visit_id=v_id,
@@ -1568,6 +1605,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("drugrate", ArrayType(StringType()), False),
                 StructField("infusionrate", ArrayType(StringType()), False),
@@ -1581,6 +1619,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = df["drugname"].tolist()
+            name = ["drugname"] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["infusionoffset"].tolist()
@@ -1594,6 +1633,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 drugrate,
                 infusionrate,
@@ -1609,13 +1649,15 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, drugrate, infusionrate, drugamount, volumeoffluid, patientweight
+                code, name, timestamp, drugrate, infusionrate, drugamount, volumeoffluid,
+                patientweight
             ) in zip(
-                row["code"], row["timestamp"], row["drugrate"], row["infusionrate"],
+                row["code"], row["name"], row["timestamp"], row["drugrate"], row["infusionrate"],
                 row["drugamount"], row["volumeoffluid"], row["patientweight"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eICU_DRUGNAME",
                     visit_id=v_id,
@@ -1677,6 +1719,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("celllabel", ArrayType(StringType()), False),
                 StructField("cellattribute", ArrayType(StringType()), False),
@@ -1688,6 +1731,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = df["cellattributepath"].tolist()
+            name = ["cellattributepath"] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["nursecareoffset"].tolist()
@@ -1699,6 +1743,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 celllabel,
                 cellattribute,
@@ -1712,11 +1757,12 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for code, timestamp, celllabel, cellattribute, cellattributevalue in zip(
-                row["code"], row["timestamp"], row["celllabel"], row["cellattribute"],
+                row["code"], row["name"], row["timestamp"], row["celllabel"], row["cellattribute"],
                 row["cellattributevalue"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eicu_CELLATTRIBUTEPATH",
                     visit_id=v_id,
@@ -1776,6 +1822,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("nursingchartcelltypecat", ArrayType(StringType()), False),
                 StructField("nursingchartcelltypevallabel", ArrayType(StringType()), False),
@@ -1787,6 +1834,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = df["nursingchartcelltypevalname"].tolist()
+            name = ["nursingchartcelltypevalname"] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["nursingchartoffset"].tolist()
@@ -1798,6 +1846,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 nursingchartcelltypecat,
                 nursingchartcelltypevallabel,
@@ -1811,14 +1860,15 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, nursingchartcelltypecat, nursingchartcelltypevallabel,
+                code, name, timestamp, nursingchartcelltypecat, nursingchartcelltypevallabel,
                 nursingchartvalue
             ) in zip(
-                row["code"], row["timestamp"], row["nursingchartcelltypecat"],
+                row["code"], row["name"], row["timestamp"], row["nursingchartcelltypecat"],
                 row["nursingchartcelltypevallabel"], row["nursingchartvalue"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eicu_NURSINGCHARTCELLTYPEVALNAME",
                     visit_id=v_id,
@@ -1878,6 +1928,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("intaketotal", ArrayType(StringType()), False),
                 StructField("outputtotal", ArrayType(StringType()), False),
@@ -1893,6 +1944,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = df["cellpath"]
+            name = ["cellpath"] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["intakeoutputoffset"].tolist()
@@ -1908,6 +1960,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 intaketotal,
                 outputtotal,
@@ -1925,15 +1978,16 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, intaketotal, outputtotal, dialysistotal, nettotal, celllabel,
-                cellvaluenumeric, cellvaluetext
+                code, name, timestamp, intaketotal, outputtotal, dialysistotal, nettotal,
+                celllabel, cellvaluenumeric, cellvaluetext
             ) in zip(
-                row["code"], row["timestamp"], row["intaketotal"], row["outputtotal"],
+                row["code"], row["name"], row["timestamp"], row["intaketotal"], row["outputtotal"],
                 row["dialysistotal"], row["nettotal"], row["celllabel"], row["cellvaluenumeric"],
                 row["cellvaluetext"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eicu_INTAKEOUTPUTCELLPATH",
                     visit_id=v_id,
@@ -2001,6 +2055,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("culturesite", ArrayType(StringType()), False),
                 StructField("organism", ArrayType(StringType()), False),
@@ -2013,6 +2068,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = [None] * len(df)
+            name = [None] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["culturetakenoffset"].tolist()
@@ -2025,6 +2081,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 culturesite,
                 organism,
@@ -2038,12 +2095,13 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             events = []
             p_id = row["patient_id"]
             v_id = row["visit_id"]
-            for code, timestamp, culturesite, organism, antibiotic, sensitivitylevel in zip(
-                row["code"], row["timestamp"], row["culturesite"], row["organism"],
+            for code, name, timestamp, culturesite, organism, antibiotic, sensitivitylevel in zip(
+                row["code"], row["name"], row["timestamp"], row["culturesite"], row["organism"],
                 row["antibiotic"], row["sensitivitylevel"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eICU_MICROLABSTRING",
                     visit_id=v_id,
@@ -2104,6 +2162,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("celllabel", ArrayType(StringType()), False),
                 StructField("cellattribute", ArrayType(StringType()), False),
@@ -2115,6 +2174,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = df["cellattributepath"].tolist()
+            name = ["cellattributepath"] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["nurseassessoffset"].tolist()
@@ -2126,6 +2186,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 celllabel,
                 cellattribute,
@@ -2138,12 +2199,13 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             events = []
             p_id = row["patient_id"]
             v_id = row["visit_id"]
-            for code, timestamp, celllabel, cellattribute, cellattributevalue in zip(
-                row["code"], row["timestamp"], row["celllabel"], row["cellattribute"],
+            for code, name, timestamp, celllabel, cellattribute, cellattributevalue in zip(
+                row["code"], row["name"], row["timestamp"], row["celllabel"], row["cellattribute"],
                 row["cellattributevalue"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eicu_CELLATTRIBUTEPATH",
                     visit_id=v_id,
@@ -2207,6 +2269,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("temperature", ArrayType(StringType()), False),
                 StructField("sao2", ArrayType(StringType()), False),
@@ -2231,6 +2294,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = [None] * len(df)
+            name = [None] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["observationoffset"].tolist()
@@ -2255,6 +2319,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 temperature,
                 sao2,
@@ -2281,17 +2346,19 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, temperature, sao2, heartrate, respiration, cvp, etco2,
+                code, name, timestamp, temperature, sao2, heartrate, respiration, cvp, etco2,
                 systemicsystloic, systemicdiastolic, systemicmean, pasystolic, padiastolic,
                 pamean, st1, st2, st3, icp
             ) in zip(
-                row["code"], row["timestamp"], row["temperature"], row["sao2"], row["heartrate"],
-                row["respiration"], row["cvp"], row["etco2"], row["systemicsystolic"],
-                row["systemicdiastolic"], row["systemicmean"], row["pasystolic"],
-                row["padiastolic"], row["pamean"], row["st1"], row["st2"], row["st3"], row["icp"]
+                row["code"], row["name"], row["timestamp"], row["temperature"], row["sao2"],
+                row["heartrate"], row["respiration"], row["cvp"], row["etco2"],
+                row["systemicsystolic"], row["systemicdiastolic"], row["systemicmean"],
+                row["pasystolic"], row["padiastolic"], row["pamean"], row["st1"], row["st2"],
+                row["st3"], row["icp"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eicu_VITALPERIODICSTRING",
                     visit_id=v_id,
@@ -2368,6 +2435,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 StructField("patient_id", StringType(), False),
                 StructField("visit_id", StringType(), False),
                 StructField("code", ArrayType(StringType()), False),
+                StructField("name", ArrayType(StringType()), False),
                 StructField("timestamp", ArrayType(StringType()), False),
                 StructField("noninvasivesystolic", ArrayType(StringType()), False),
                 StructField("noninvasivediastolic", ArrayType(StringType()), False),
@@ -2386,6 +2454,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             visit_id = str(df[self.visit_key].iloc[0])
             patient_id = self.visit_id_to_patient_id[visit_id]
             code = [None] * len(df)
+            name = [None] * len(code)
             timestamp = [
                 str(self.visit_id_to_encounter_time[visit_id] + pd.Timedelta(minutes=int(offset)))
                 for offset in df["observationoffset"].tolist()
@@ -2404,6 +2473,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 patient_id,
                 visit_id,
                 code,
+                name,
                 timestamp,
                 noninvasivesystolic,
                 noninvasivediastolic,
@@ -2424,15 +2494,16 @@ class eICUSparkDataset(BaseEHRSparkDataset):
             p_id = row["patient_id"]
             v_id = row["visit_id"]
             for (
-                code, timestamp, noninvasivesystolic, noninvasivediastolic, noninvasivemean,
+                code, name, timestamp, noninvasivesystolic, noninvasivediastolic, noninvasivemean,
                 paop, cardiacoutput, cardiacinput, svr, svri, pvr, pvri
             ) in zip(
-                row["code"], row["timestamp"], row["noninvasivesystolic"],
+                row["code"], row["name"], row["timestamp"], row["noninvasivesystolic"],
                 row["noninvasivediastolic"], row["noninvasivemean"], row["paop"], row["cardiacoutput"],
                 row["cardiacinput"], row["svr"], row["svri"], row["pvr"], row["pvri"]
             ):
                 event = Event(
                     code=code,
+                    name=name,
                     table=table,
                     vocabulary="eicu_VITALAPERIODICSTRING",
                     visit_id=v_id,
