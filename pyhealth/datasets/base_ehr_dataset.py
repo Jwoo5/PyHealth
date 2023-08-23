@@ -1,9 +1,10 @@
 import logging
+import warnings
 import time
 import os
 import datetime
 from abc import ABC
-from collections import Counter
+from collections import Counter, OrderedDict
 from copy import deepcopy
 from typing import Dict, Callable, Tuple, Union, List, Optional, Literal, get_args
 
@@ -19,6 +20,8 @@ from pyhealth.datasets.utils import MODULE_CACHE_PATH, DATASET_BASIC_TABLES
 from pyhealth.datasets.utils import hash_str
 from pyhealth.medcode import CrossMap
 from pyhealth.utils import load_pickle, save_pickle
+
+from pyhealth.tasks import TASK_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -420,14 +423,23 @@ class BaseEHRSparkDataset(BaseEHRDataset):
     This class also supports additional functionalities other than Spark such as processing 
     each visit as a ICU stay instead of hospital admission based on the user choice (if applicable).
 
-    TODO: to be written for details 
-
     Args:
         dataset_name: name of the dataset.
         root: root directory of the raw data (should contain many csv files).
         tables: list of tables to be loaded (e.g., ["DIAGNOSES_ICD", "PROCEDURES_ICD"]). Basic tables will be loaded by default.
         visit_unit: unit of visit to be grouped. Available options are typed in VISIT_UNIT_CHOICES.
             Default is "hospital", which means to regard each hospital admission as a visit.
+        observation_size: size of the observation window. only the events within the first N hours
+            are included in the processed data. Default is 12.
+        gap_size: size of gap window. labels of some prediction tasks (E.g., short-term mortality
+            prediction) are defined between `observation_size` + `gap_size` and the next N hours of
+            `prediction_size`. If a patient's stay has less than `observaion_size` + `gap_size`
+            duration, some tasks cannot be defined for that stay. Default is 0.
+        prediction_size: size of prediction window. labels of some prediction tasks (E.g., short-term mortality
+            prediction) are defined between `observation_size` + `gap_size` and the next N hours of
+            `prediction_size`. Default is 24.
+        discard_samples_with_missing_label: whether to discard samples with any missing label (-1)
+            when defining tasks. Default is False, which assigns -1 to the sample on that task.
         code_mapping: a dictionary containing the code mapping information.
             The key is a str of the source code vocabulary and the value is of
             two formats:
@@ -448,7 +460,10 @@ class BaseEHRSparkDataset(BaseEHRDataset):
         root,
         tables,
         visit_unit: VISIT_UNIT_CHOICES = "hospital",
-        observation: int = 12,
+        observation_size: int = 12,
+        gap_size: int = 0,
+        prediction_size: int = 24,
+        discard_samples_with_missing_label: bool = False,
         num_threads: int = 8,
         **kwargs
     ):
@@ -458,7 +473,10 @@ class BaseEHRSparkDataset(BaseEHRDataset):
             f"be one of these choices: {get_args(VISIT_UNIT_CHOICES)}"
         )
         self.visit_unit = visit_unit
-        self.observation = observation
+        self.observation_size = observation_size
+        self.gap_size = gap_size
+        self.prediction_size = prediction_size
+        self.discard_samples_with_missing_label = discard_samples_with_missing_label
         self.num_threads=num_threads
 
         super().__init__(
@@ -472,11 +490,12 @@ class BaseEHRSparkDataset(BaseEHRDataset):
         spark: SparkSession,
         spark_df: DataFrame,
         timestamp_key: str,
+        table = None,
         joined_table: str = None,
         select: List[str] = None,
         on: str = None,
         should_infer_icustay_id: bool = False,
-    ):
+    ) -> DataFrame:
         if joined_table is not None:
             joined_df = pd.read_csv(os.path.join(self.root, f"{joined_table}.csv"))
             if self.encounter_key is not None:
@@ -487,29 +506,35 @@ class BaseEHRSparkDataset(BaseEHRDataset):
                 joined_df.loc[:, self.discharge_key] = pd.to_datetime(
                     joined_df[self.discharge_key], infer_datetime_format=True
                 )
-            joined_df = spark.createDataFrame(joined_df)
+            joined_df = spark.createDataFrame(joined_df[select])
 
-            spark_df = spark_df.join(joined_df.select(*select), on=on, how="inner")
+            spark_df = spark_df.join(joined_df, on=on, how="inner")
 
         if should_infer_icustay_id:
             spark_df = spark_df.filter(
                 (F.col(self.encounter_key) <= F.col(timestamp_key))
                 & (F.col(timestamp_key) <= F.col(self.discharge_key))
             )
-        else:
+        elif timestamp_key is not None:
             if self.encounter_key is None:
                 spark_df = spark_df.filter(0 <= F.col(timestamp_key))
             else:
                 spark_df = spark_df.filter(F.col(self.encounter_key) <= F.col(timestamp_key))
 
         # filter by observation window
-        if self.observation is not None and self.observation >= 0:
-            if self.encounter_key is None:
-                spark_df = spark_df.filter(F.col(timestamp_key) <= 60 * self.observation)
+        if self.observation_size is not None and self.observation_size >= 0:
+            if timestamp_key is not None:
+                if self.encounter_key is None:
+                    spark_df = spark_df.filter(F.col(timestamp_key) <= 60 * self.observation_size)
+                else:
+                    spark_df = spark_df.filter(
+                        (F.col(timestamp_key) - F.col(self.encounter_key))
+                        <= datetime.timedelta(hours=self.observation_size)
+                    )
             else:
-                spark_df = spark_df.filter(
-                    (F.col(timestamp_key) - F.col(self.encounter_key))
-                    <= datetime.timedelta(hours=self.observation)
+                warnings.warn(
+                    f"Cannot apply observation windows to {table} table since these events do not "
+                    "include timestamp information."
                 )
 
         return spark_df
@@ -540,7 +565,7 @@ class BaseEHRSparkDataset(BaseEHRDataset):
         spark = spark.getOrCreate()
 
         patients: Dict[str, Patient] = dict()
-        
+
         tic = time.time()
         patients = self.parse_basic_info(patients)
         print(
@@ -558,15 +583,125 @@ class BaseEHRSparkDataset(BaseEHRDataset):
                 )
             patients = parse_table(patients, spark)
             print(f"finish parsing {table} : {time.time() - tic}s")
-
         return patients
 
     def set_task(
         self,
-        task_fn: Union[str, Callable, List[str], List[Callable]],
+        tasks: Union[str, Callable, List[str], List[Callable]],
         feature_process_fn: Callable,
     ) -> SampleEHRDataset:
-        """TODO: to be written"""
+        """Processes the base spark dataset to generate the sample dataset.
+        
+        This function should be called by the user after the base spark dataset is
+        initialized. It will iterate through all patients in the base spark dataset
+        and call each task in the tasks, which should be implemented by the specific task
+        in PyHealth, or user-defined Callable function that outputs the corresponding
+        label for each visit_id as a Python dictionary.
+        
+        Args:
+            tasks: a list of strings or Callable functions that take a single patient and returns
+                a list of visit samples (each sample is a dict with label as a key). The samples
+                will be concatenated to form the sample dataset. The example task functions are
+                defined in pyhealth.tasks.icu.*.py.
+            feature_process_fn: a function that takes a single patient and returns a list of
+                dictionaries with patient_id, visit_id, and other processed features as key.
+        
+        Returns:
+            sample_dataset: the sample dataset composed of processed features and their labels.
+        
+        Note:
+            Each task in `tasks` can be a string indicating the name of the pre-defined task which
+                is stored in `TASK_REGISTRY` in pyhealth.tasks
+        """
 
-        if isinstance(task_fn, str):
-            ...
+        if not isinstance(tasks, list):
+            tasks = [tasks]
+        task_names = []
+        for task in tasks:
+            if isinstance(task, str):
+                task_name = task
+            else:
+                task_name = task.__name__
+            task_names.append(task_name)
+        task_names = ",".join(task_names)
+
+        samples = []
+        excluded_visits = []
+        missing_label_tasks = {}
+        for patient_id, patient in self.patients.items():
+            visit_samples = feature_process_fn(patient)
+            if not isinstance(visit_samples, list):
+                raise ValueError(
+                    "feature_process_fn should return a list of sample features"
+                )
+
+            labels = {x["visit_id"]: [] for x in visit_samples}
+            exclude = []
+            for task in tasks:
+                if isinstance(task, str):
+                    task_name = task
+                    task = TASK_REGISTRY.get(task, None)
+                    assert task is not None, (
+                        f"Could not infer task function from {task_name}. Available tasks: {TASK_REGISTRY.keys()}"
+                    )
+                label = task(
+                    patient,
+                    obs_size=self.observation_size,
+                    gap_size=self.gap_size,
+                    pred_size=self.prediction_size,
+                    root = self.root # for some tasks that need to load a raw table
+                )
+                for visit_id in labels.keys():
+                    if label[visit_id] == -1:
+                        if task_name not in missing_label_tasks:
+                            missing_label_tasks[task_name] = 0
+                        missing_label_tasks[task_name] += 1
+                        if self.discard_samples_with_missing_label:
+                            exclude.append(visit_id)
+                    labels[visit_id].append(label[visit_id])
+
+            exclude = list(set(exclude))
+            excluded_visits.extend(exclude)
+            
+            for i, (visit_id, label) in enumerate(labels.items()):
+                assert visit_samples[i]["visit_id"] == visit_id, (
+                    visit_samples[i]["visit_id"], visit_id
+                )
+                if visit_id in exclude:
+                    continue
+                
+                for j, y in enumerate(label):
+                    visit_samples[i][f"label_{j}"] = y
+
+            samples.extend([x for x in visit_samples if "label_0" in x])
+
+        if self.discard_samples_with_missing_label and len(excluded_visits) > 0:
+            print(
+                f"{len(excluded_visits)} samples are excluded as they have missing labels for "
+                "some tasks"
+            )
+        else:
+            # NOTE each task can output missing label (-1)
+            for task_name, counts in missing_label_tasks.items():
+                if counts > 0:
+                    print(
+                        f"{counts} out of {len(samples)} samples are assigned missing label (-1) for {task_name} task."
+                    )
+
+        # NOTE we set task_name to be a comma-separated list of multiple tasks
+        sample_dataset = SampleEHRDataset(
+            samples,
+            dataset_name=self.dataset_name,
+            task_name=task_names
+        )
+        return sample_dataset
+
+def tmp_feature_process_fn(patient: Patient):
+    samples = []
+    for visit in patient:
+        samples.append({
+            "patient_id": patient.patient_id,
+            "visit_id": visit.visit_id,
+            "codes": visit.diagnosis_codes
+        })
+    return samples 
