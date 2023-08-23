@@ -411,6 +411,8 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
         prediction_size: size of prediction window. labels of some prediction tasks (E.g., short-term mortality
             prediction) are defined between `observation_size` + `gap_size` and the next N hours of
             `prediction_size`. Default is 24.
+        discard_samples_with_missing_label: whether to discard samples with any missing label (-1)
+            when defining tasks. Default is False, which assigns -1 to the sample on that task.
         code_mapping: a dictionary containing the code mapping information.
             The key is a str of the source code vocabulary and the value is of
             two formats:
@@ -544,7 +546,10 @@ class MIMIC3SparkDataset(BaseEHRSparkDataset):
                     discharge_location=v_info["DISCHARGE_LOCATION"].values[0],
                     hadm_id=v_info["HADM_ID"].values[0],
                     hospital_discharge_time=strptime(v_info["DISCHTIME"].values[0]),
-                    diagnosis_codes=v_info["ICD9_CODE"].values[0]
+                    diagnosis_codes=(
+                        v_info["ICD9_CODE"].values[0]
+                        if type(v_info["ICD9_CODE"].values[0][0]) != float else []
+                    )
                 )
                 # add visit
                 patient.add_visit(visit)

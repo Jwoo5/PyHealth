@@ -473,6 +473,8 @@ class MIMIC4SparkDataset(BaseEHRSparkDataset):
         prediction_size: size of prediction window. labels of some prediction tasks (E.g., short-term mortality
             prediction) are defined between `observation_size` + `gap_size` and the next N hours of
             `prediction_size`. Default is 24.
+        discard_samples_with_missing_label: whether to discard samples with any missing label (-1)
+            when defining tasks. Default is False, which assigns -1 to the sample on that task.
         code_mapping: a dictionary containing the code mapping information.
             The key is a str of the source code vocabulary and the value is of
             two formats:
@@ -561,7 +563,7 @@ class MIMIC4SparkDataset(BaseEHRSparkDataset):
         diagnoses_df = pd.read_csv(path, dtype={"hadm_id": str})
         diagnoses_df = diagnoses_df.groupby(
             "hadm_id"
-        )["icd_code"].agg(lambda x: list(set(x))).to_frame()
+        )[["icd_code", "icd_version"]].agg(list)
 
         # merge patient, admission, and icustay tables
         df = pd.merge(
@@ -616,7 +618,8 @@ class MIMIC4SparkDataset(BaseEHRSparkDataset):
                     discharge_location=v_info["discharge_location"].values[0],
                     hadm_id=v_info["hadm_id"].values[0],
                     hospital_discharge_time=strptime(v_info["dischtime"].values[0]),
-                    diagnosis_codes=v_info["icd_code"].values[0]
+                    diagnosis_codes=v_info["icd_code"].values[0],
+                    icd_versions = v_info["icd_version"].values[0]
                 )
                 # add visit
                 patient.add_visit(visit)

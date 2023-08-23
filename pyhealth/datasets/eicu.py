@@ -716,6 +716,8 @@ class eICUSparkDataset(BaseEHRSparkDataset):
         prediction_size: size of prediction window. labels of some prediction tasks (E.g., short-term
             mortality prediction) are defined between `observation_size` + `gap_size` and the next N
             hours of `prediction_size`. Default is 24.
+        discard_samples_with_missing_label: whether to discard samples with any missing label (-1)
+            when defining tasks. Default is False, which assigns -1 to the sample on that task.
         code_mapping: a dictionary containing the code mapping information.
             The key is a str of the source code vocabulary and the value is of
             two formats:
@@ -776,6 +778,7 @@ class eICUSparkDataset(BaseEHRSparkDataset):
         Docs:
             - patient: https://eicu-crd.mit.edu/eicutables/patient/
             - hospital: https://eicu-crd.mit.edu/eicutables/hospital/
+            - diagnosis: https://eicu-crd.mit.edu/eicutables/diagnosis/
 
         Args:
             patients: a dict of `Patient` objects indexed by patient_id.
@@ -801,8 +804,18 @@ class eICUSparkDataset(BaseEHRSparkDataset):
         # read hospital table
         hospital_df = pd.read_csv(os.path.join(self.root, "hospital.csv"))
         hospital_df.region = hospital_df.region.fillna("Unknown").astype(str)
+        # read diagnosis table
+        diagnoses_df = pd.read_csv(
+            os.path.join(self.root, "diagnosis.csv"),
+            dtype={"patientunitstayid": str, "icd9code": str, "diagnosisstring": str}
+        )
+        diagnoses_df = diagnoses_df.groupby(
+            "patientunitstayid"
+        )[["icd9code", "diagnosisstring"]].agg(list)
         # merge patient and hospital tables
         df = pd.merge(patient_df, hospital_df, on="hospitalid", how="left")
+        # merge with diagnosis table
+        df = pd.merge(df, diagnoses_df, on="patientunitstayid", how="left")
         # sort by ICU admission and discharge time
         df["neg_hospitaladmitoffset"] = -df["hospitaladmitoffset"]
         df = df.sort_values(
@@ -859,9 +872,18 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                 # base time is the hospital admission time
                 unit_admit = v_info["neg_hospitaladmitoffset"].values[0]
                 unit_discharge = unit_admit + v_info["unitdischargeoffset"].values[0]
+                unit_hospital_discharge = unit_admit + v_info["hospitaldischargeoffset"].values[0]
                 encounter_time = ha_datetime + pd.Timedelta(minutes=unit_admit)
                 discharge_time = ha_datetime + pd.Timedelta(minutes=unit_discharge)
-                
+                hospital_discharge_time = ha_datetime + pd.Timedelta(minutes=unit_hospital_discharge)
+
+                if type(v_info["icd9code"].values[0]) == float:
+                    diagnosis_codes = []
+                    diagnosis_string = []
+                else:
+                    diagnosis_codes = [x if str(x) != "nan" else "nan" for x in v_info["icd9code"].values[0]]
+                    diagnosis_string = v_info["diagnosisstring"].values[0]
+
                 visit = Visit(
                     visit_id=v_id,
                     patient_id=patient_id,
@@ -870,6 +892,12 @@ class eICUSparkDataset(BaseEHRSparkDataset):
                     discharge_status=v_info["unitdischargestatus"].values[0],
                     hospital_id=v_info["hospitalid"].values[0],
                     region=v_info["region"].values[0],
+                    hadm_id = ha_id,
+                    visit_number=v_info["unitvisitnumber"].values[0],
+                    hospital_discharge_time=hospital_discharge_time,
+                    hospital_discharge_location=v_info["hospitaldischargelocation"].values[0],
+                    diagnosis_codes=diagnosis_codes,
+                    diagnosis_string=diagnosis_string
                 )
 
                 # add visit
